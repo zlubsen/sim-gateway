@@ -7,6 +7,8 @@ use tokio::sync::mpsc::Receiver;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::events::Command;
+
 pub struct Route {
     in_point : EndPoint,
     out_point : EndPoint,
@@ -36,15 +38,15 @@ pub enum ProtocolType {
 //     fn apply(&self) -> &self;
 // }
 
-pub async fn start_main_task(mut to_rt_rx: Receiver<KeyEvent>, shutdown_tx : BlockingSender<bool>) {
+pub async fn start_main_task(mut to_rt_rx: Receiver<Command>, to_gui_tx : BlockingSender<Command>, shutdown_tx : BlockingSender<Command>) {
     // spawn gateway main task
-    let _main_task = tokio::spawn(start_route() );
+    let _main_task = tokio::spawn(start_route(to_gui_tx) );
 
-    while let Some(key) = to_rt_rx.recv().await {
-        match key.code {
-            KeyCode::Char('q') => {
+    while let Some(cmd) = to_rt_rx.recv().await {
+        match cmd {
+            Command::Quit => {
                 println!("rt will quit");
-                shutdown_tx.send(true).expect("Shutdown signal send failure");
+                shutdown_tx.send(cmd).expect("Shutdown signal send failure");
                 break;
             }
             _ => {}
@@ -52,11 +54,12 @@ pub async fn start_main_task(mut to_rt_rx: Receiver<KeyEvent>, shutdown_tx : Blo
     }
 }
 
-async fn start_route() {
+async fn start_route(gui_tx : BlockingSender<Command>) {
     let mut interval = interval(Duration::from_secs(2));
 
     loop {
         interval.tick().await;
-        println!("I'm the networking task.");
+        gui_tx.send(Command::None);
+        // println!("I'm the networking task.");
     }
 }

@@ -18,23 +18,40 @@ use tui::{
     Terminal,
 };
 
+use crate::events::Command;
+use std::time::Duration;
+
+struct App {
+    active_area : Area,
+    prompt : String,
+}
+
+enum State {
+}
+
+enum Area {
+    RouteList,
+    RouteDetails,
+    Prompt,
+}
+
 pub struct Settings {
     pub(crate) placeholder: i32,
 }
 
-pub fn start_gui(settings: Settings, rx: Receiver<KeyEvent>) -> Result<JoinHandle<()>, Error> {
+pub fn start_gui(settings: Settings, rx: Receiver<Command>) -> Result<JoinHandle<()>, Error> {
     let gui_builder = Builder::new().name("GUI".into());
     gui_builder.spawn(move || {
-        let mut do_quit = false;
-
         let stdout = stdout();
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.clear().unwrap();
 
+        const RENDER_RATE : Duration = Duration::from_millis(100);
+
         let menu_titles = vec!["Home", "Pets", "Add", "Delete", "Quit"];
 
-        while !do_quit {
+        loop {
             terminal.draw(|rect| {
                 let size = rect.size();
                 let chunks = Layout::default()
@@ -60,6 +77,7 @@ pub fn start_gui(settings: Settings, rx: Receiver<KeyEvent>) -> Result<JoinHandl
                             .title("Copyright")
                             .border_type(BorderType::Plain),
                     );
+                rect.render_widget(copyright, chunks[2]);
 
                 let menu = menu_titles
                     .iter()
@@ -88,13 +106,20 @@ pub fn start_gui(settings: Settings, rx: Receiver<KeyEvent>) -> Result<JoinHandl
             }).unwrap();
 
             // handle inputs
-            let event = rx.recv().unwrap();
-            match event.code {
-                KeyCode::Char('q') => {
-                    do_quit = true;
-                }
-                _ => {
-                    print!("{:?}", event)
+            if let Ok(command) = rx.recv_timeout(RENDER_RATE) {
+                match command {
+                    Command::Quit => {
+                        break;
+                    }
+                    Command::Key(char) => {
+                        print!("{}", char);
+                    }
+                    Command::None => {
+                        print!(".");
+                    }
+                    _ => {
+                        // print!("{:?}", command)
+                    }
                 }
             }
         }

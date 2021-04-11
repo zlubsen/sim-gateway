@@ -1,5 +1,4 @@
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
-use std::error::Error;
 
 #[derive(Debug)]
 pub enum Command {
@@ -10,8 +9,9 @@ pub enum Command {
     Right,
     Tab,
     Enter,
-    Quit,
     Key(char),
+    Backspace,
+    Quit,
 }
 
 impl Command {
@@ -37,8 +37,10 @@ impl Command {
             KeyCode::Right => Command::Right,
             KeyCode::Tab => Command::Tab,
             KeyCode::Enter => Command::Enter,
+            KeyCode::Backspace => Command::Backspace,
             KeyCode::Char(ch) => {
                 if ch == 'q' && key.modifiers == KeyModifiers::CONTROL { Command::Quit }
+                // else if ch == 'Q' && key.modifiers == KeyModifiers::SHIFT { Command::Quit }
                 else { Command::Key(keycode_to_char(key.code).unwrap()) }
             }
             _ => {
@@ -52,4 +54,17 @@ fn keycode_to_char(keycode : KeyCode) -> Result<char, ()> {
         KeyCode::Char(ch) => Ok(ch),
         _ => Err(()),
     }
+}
+
+pub fn parse_command(input : &str) -> Command {
+    let mut tokens = input.split_whitespace();
+
+    for token in tokens {
+        return match token {
+            "quit" => Command::Quit,
+            _ => Command::None
+        }
+    };
+
+    Command::None
 }

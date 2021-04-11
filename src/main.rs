@@ -76,11 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     const INPUT_POLL_RATE : u64 = 100;
-    const INPUT_RECV_TIMEOUT : u64 = 100;
 
-    let (to_rt_tx, to_rt_rx) = tokio_async_channel(10);
-    let (to_gui_tx, to_gui_rx) = std_sync_channel();
-    let (shutdown_tx, shutdown_rx) = std_sync_channel();
+    let (to_rt_tx, rt_rx) = tokio_async_channel(10);
+    let gui_to_rt_tx = to_rt_tx.clone();
+    let (to_gui_tx, gui_rx) = std_sync_channel();
     let rt_to_gui_tx = to_gui_tx.clone();
 
     let input_thread = {
@@ -92,7 +91,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         input_builder.spawn(move || {
             let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
-            let receive_rate = std::time::Duration::from_millis(INPUT_RECV_TIMEOUT);
 
             loop {
                 if event::poll(poll_rate).expect("Key event polling error") {
@@ -103,8 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         to_rt_tx.blocking_send(Command::from(key)).expect("Send key event to runtime error");
                     }
                 }
-                if shutdown_rx.recv_timeout(receive_rate).is_ok() {
-                    println!("Shutdown signal received.");
+                if to_rt_tx.is_closed() { // shutdown when the rt thread channel is closed
                     break;
                 }
             }
@@ -117,7 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Settings {
                 placeholder: 0
             },
-            to_gui_rx)
+            gui_rx,
+            gui_to_rt_tx)
         }
         Mode::Headless => Err(Error::new(ErrorKind::Other, "GUI not available in Headless mode"))
     };
@@ -125,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _runtime_thread = {
         let rt_builder = thrBuilder::new().name("Runtime".into());
         rt_builder.spawn(move || {
-            runtime.block_on(start_main_task(to_rt_rx, rt_to_gui_tx, shutdown_tx));
+            runtime.block_on(start_main_task(rt_rx, rt_to_gui_tx));
             runtime.shutdown_background();
         })
     };

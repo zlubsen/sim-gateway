@@ -38,15 +38,13 @@ pub enum ProtocolType {
 //     fn apply(&self) -> &self;
 // }
 
-pub async fn start_main_task(mut to_rt_rx: Receiver<Command>, to_gui_tx : BlockingSender<Command>, shutdown_tx : BlockingSender<Command>) {
+pub async fn start_main_task(mut rt_rx: Receiver<Command>, to_gui_tx : BlockingSender<Command>) {
     // spawn gateway main task
     let _main_task = tokio::spawn(start_route(to_gui_tx) );
 
-    while let Some(cmd) = to_rt_rx.recv().await {
-        match cmd {
+    while let Some(command) = rt_rx.recv().await {
+        match command {
             Command::Quit => {
-                println!("rt will quit");
-                shutdown_tx.send(cmd).expect("Shutdown signal send failure");
                 break;
             }
             _ => {}
@@ -59,7 +57,6 @@ async fn start_route(gui_tx : BlockingSender<Command>) {
 
     loop {
         interval.tick().await;
-        gui_tx.send(Command::None);
-        // println!("I'm the networking task.");
+        gui_tx.send(Command::None); // no-op for now, to show a sign of life
     }
 }

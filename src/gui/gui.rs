@@ -18,12 +18,19 @@ use tui::{
     Terminal,
 };
 
-use crate::events::Command;
+use crate::events::{Command, parse_command};
 use std::time::Duration;
+use tokio::sync::mpsc::Sender;
+use tui::layout::Rect;
+
+const RENDER_RATE : Duration = Duration::from_millis(1000);
+const PROMPT_START : &str = " $ ";
 
 struct App {
     active_area : Area,
     prompt : String,
+    kill_signal : bool,
+    to_rt_tx : Sender<Command>,
 }
 
 enum State {
@@ -39,7 +46,52 @@ pub struct Settings {
     pub(crate) placeholder: i32,
 }
 
-pub fn start_gui(settings: Settings, rx: Receiver<Command>) -> Result<JoinHandle<()>, Error> {
+impl App {
+    fn handle_command(&mut self, command : Command) {
+        match command {
+            Command::Quit => {
+                self.kill_signal = true;
+                self.to_rt_tx.blocking_send(Command::Quit);
+            }
+            Command::Key(char) => {
+                self.prompt.push(char);
+            }
+            Command::Backspace => {
+                self.prompt.pop();
+            }
+            Command::Enter => {
+                match self.active_area {
+                    Area::Prompt => {
+                        let prompt_cmd = parse_command(self.prompt.as_str());
+                        self.prompt.clear();
+                        self.handle_command(prompt_cmd);
+                    }
+                    _ => {}
+                }
+            }
+            Command::Tab => {
+                self.active_area = match self.active_area {
+                    Area::Prompt => Area::RouteList,
+                    Area::RouteList => Area::RouteDetails,
+                    Area::RouteDetails => Area::Prompt,
+                }
+            }
+            Command::None => {
+            }
+            _ => {
+            }
+        }
+    }
+}
+
+pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>) -> Result<JoinHandle<()>, Error> {
+    let mut app = App {
+        active_area : Area::Prompt,
+        prompt : String::default(),
+        kill_signal : false,
+        to_rt_tx : tx,
+    };
+
     let gui_builder = Builder::new().name("GUI".into());
     gui_builder.spawn(move || {
         let stdout = stdout();
@@ -47,11 +99,9 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>) -> Result<JoinHandle
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.clear().unwrap();
 
-        const RENDER_RATE : Duration = Duration::from_millis(100);
-
         let menu_titles = vec!["Home", "Pets", "Add", "Delete", "Quit"];
 
-        loop {
+        while !app.kill_signal {
             terminal.draw(|rect| {
                 let size = rect.size();
                 let chunks = Layout::default()
@@ -61,23 +111,23 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>) -> Result<JoinHandle
                         [
                             Constraint::Length(3),
                             Constraint::Min(2),
-                            Constraint::Length(3),
+                            Constraint::Length(6),
                         ]
                             .as_ref(),
                     )
                     .split(size);
 
-                let copyright = Paragraph::new("pet-CLI 2020 - all rights reserved")
-                    .style(Style::default().fg(Color::LightCyan))
-                    .alignment(Alignment::Center)
+                let prompt = Paragraph::new(format!("{}{}", PROMPT_START, app.prompt))
+                    .style(Style::default().fg(Color::LightGreen))
+                    .alignment(Alignment::Left)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .style(Style::default().fg(Color::White))
-                            .title("Copyright")
+                            .title("Console:")
                             .border_type(BorderType::Plain),
                     );
-                rect.render_widget(copyright, chunks[2]);
+                rect.render_widget(prompt, chunks[2]);
 
                 let menu = menu_titles
                     .iter()
@@ -103,24 +153,21 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>) -> Result<JoinHandle
                     .divider(Span::raw("|"));
 
                 rect.render_widget(tabs, chunks[0]);
+
+                let middle_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)].as_ref())
+                    .split(Rect {
+                        x: 0,
+                        y: 0,
+                        width: 9,
+                        height: 2,
+                    });
             }).unwrap();
 
             // handle inputs
             if let Ok(command) = rx.recv_timeout(RENDER_RATE) {
-                match command {
-                    Command::Quit => {
-                        break;
-                    }
-                    Command::Key(char) => {
-                        print!("{}", char);
-                    }
-                    Command::None => {
-                        print!(".");
-                    }
-                    _ => {
-                        // print!("{:?}", command)
-                    }
-                }
+                app.handle_command(command);
             }
         }
         disable_raw_mode().unwrap();

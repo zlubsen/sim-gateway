@@ -43,7 +43,7 @@ enum Area {
 }
 
 pub struct Settings {
-    pub(crate) placeholder: i32,
+    pub(crate) routes: Vec<i32>,
 }
 
 impl App {
@@ -99,7 +99,7 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>)
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.clear().unwrap();
 
-        let menu_titles = vec!["Home", "Pets", "Add", "Delete", "Quit"];
+        // let menu_titles = vec!["Stats", "Routes"];
 
         while !app.kill_signal {
             terminal.draw(|rect| {
@@ -129,30 +129,34 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>)
                     );
                 rect.render_widget(prompt, chunks[2]);
 
-                let menu = menu_titles
-                    .iter()
-                    .map(|t| {
-                        let (first, rest) = t.split_at(1);
-                        Spans::from(vec![
-                            Span::styled(
-                                first,
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::UNDERLINED),
-                            ),
-                            Span::styled(rest, Style::default().fg(Color::White)),
-                        ])
-                    })
-                    .collect();
+                // let menu = menu_titles
+                //     .iter()
+                //     .map(|t| {
+                //         let (first, rest) = t.split_at(1);
+                //         Spans::from(vec![
+                //             Span::styled(
+                //                 first,
+                //                 Style::default()
+                //                     .fg(Color::Yellow)
+                //                     .add_modifier(Modifier::UNDERLINED),
+                //             ),
+                //             Span::styled(rest, Style::default().fg(Color::White)),
+                //         ])
+                //     })
+                //     .collect();
 
-                let tabs = Tabs::new(menu)
-                    .select(0)
-                    .block(Block::default().title("Menu").borders(Borders::ALL))
+                // let tabs = Tabs::new(menu)
+                //     .select(0)
+                //     .block(Block::default().title("Menu").borders(Borders::ALL))
+                //     .style(Style::default().fg(Color::White))
+                //     .highlight_style(Style::default().fg(Color::Yellow))
+                //     .divider(Span::raw("|"));
+                // rect.render_widget(tabs, chunks[0]);
+
+                let header = Paragraph::new("Simulation Gateway - (c) Zeeger Lubsen, 2021")
                     .style(Style::default().fg(Color::White))
-                    .highlight_style(Style::default().fg(Color::Yellow))
-                    .divider(Span::raw("|"));
-
-                rect.render_widget(tabs, chunks[0]);
+                    .block(Block::default().borders(Borders::ALL));
+                rect.render_widget(header, chunks[0]);
 
                 let middle_chunks = Layout::default()
                     .direction(Direction::Horizontal)
@@ -163,6 +167,15 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>)
                         width: 9,
                         height: 2,
                     });
+
+                let routes = [ListItem::new("Route One"), ListItem::new("Route Two"), ListItem::new("Route Three")]; //settings.routes.iter().map(|r|->ListItem::new(r));
+                let route_list = List::new(routes)
+                    .block(Block::default().title("List").borders(Borders::ALL))
+                    .style(Style::default().fg(Color::White))
+                    .highlight_style(Style::default().add_modifier(Modifier::ITALIC));
+                // rect.render_widget(middle_chunks, chunks[1]);
+                // rect.render_widget(route_list, middle_chunks[1]);
+                // rect.render_widget(middle_chunks, chunks[1]);
             }).unwrap();
 
             // handle inputs

@@ -18,7 +18,7 @@ use std::thread::{Builder as thrBuilder};
 use std::sync::mpsc::channel as std_sync_channel;
 
 use crate::gui::{start_gui, Settings};
-use crate::runtime::{start_main_task, Route};
+use crate::runtime::{start_runtime_task, Route};
 use crate::events::Command;
 
 struct GateConfig {
@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Interactive => {
             start_gui(
                 Settings {
-                placeholder: 0
+                routes: vec![0,1,2]
             },
             gui_rx,
             gui_to_rt_tx)
@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _runtime_thread = {
         let rt_builder = thrBuilder::new().name("Runtime".into());
         rt_builder.spawn(move || {
-            runtime.block_on(start_main_task(rt_rx, rt_to_gui_tx));
+            runtime.block_on(start_runtime_task(rt_rx, rt_to_gui_tx));
             runtime.shutdown_background();
         })
     };

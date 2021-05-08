@@ -14,8 +14,8 @@ pub enum Command {
     Quit,
 }
 
-impl Command {
-    pub fn from(key : KeyEvent) -> Command {
+impl From<KeyEvent> for Command {
+    fn from(key : KeyEvent) -> Command {
         // let mut lookup = HashMap::new();
         // lookup.insert(KeyEvent {code:KeyCode::Up, modifiers:KeyModifiers::NONE}, Command::Up);
         // lookup.insert(KeyEvent {code:KeyCode::Down, modifiers:KeyModifiers::NONE}, Command::Down);
@@ -61,6 +61,7 @@ pub fn parse_command(input : &str) -> Command {
 
     for token in tokens {
         return match token {
+            "q" => Command::Quit,
             "quit" => Command::Quit,
             _ => Command::None
         }

@@ -22,6 +22,7 @@ use crate::events::{Command, parse_command};
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tui::layout::Rect;
+use crate::model::config::Config;
 
 const RENDER_RATE : Duration = Duration::from_millis(1000);
 const PROMPT_START : &str = " $ ";

@@ -1,6 +1,10 @@
 pub mod events;
 pub mod gui;
 pub mod runtime;
+pub mod model;
+
+use log::{error, warn, info, debug, trace};
+use env_logger::init;
 
 extern crate clap;
 use clap::{Arg, App};
@@ -13,37 +17,21 @@ use crossterm::{
     terminal::enable_raw_mode
 };
 
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Read};
 use std::thread::{Builder as thrBuilder};
 use std::sync::mpsc::channel as std_sync_channel;
 
 use crate::gui::{start_gui, Settings};
-use crate::runtime::{start_runtime_task, Route};
+use crate::runtime::{start_runtime_task};
 use crate::events::Command;
+use crate::model::arguments::*;
+use crate::model::config::*;
 
-struct GateConfig {
-    mode : Mode,
-    routes : Vec<Route>,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum Mode {
-    Interactive,
-    Headless,
-}
-
-impl Default for Mode {
-    fn default() -> Self { Mode::Interactive }
-}
+use toml;
+use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = rtBuilder::new_multi_thread()
-        .enable_io()
-        .enable_time()
-        .on_thread_start(|| {
-            println!("Async runtime thread started.");
-        }).build().unwrap();
-    let _guard = runtime.enter();
+    env_logger::init();
 
     // Read config: we expect a .toml file with the config (required for now).
     // TODO Or perhaps later most settings as separate arguments.
@@ -65,15 +53,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .help("Enable interactive CLI mode"))
         .get_matches();
 
-    // TODO make config mandatory
-    // if let Some(config) = arg_matches.value_of("config").unwrap() {
-    //
-    // }
+    if let Some(config_file) = arg_matches.value_of("config") {
+        info!("Read arguments from file {}", config_file);
+        let mut file = File::open(config_file)?;
+        let mut buffer = String::new();
+        file.read_to_string(&mut buffer)?;
+        let arguments : Arguments = toml::from_str(buffer.as_str()).unwrap();
+        trace!("Args:\n{:?}", arguments)
+    }
 
-    let config = GateConfig {
+    Config {
         mode: if arg_matches.is_present("interactive") { Mode::Interactive } else { Mode::Headless },
-        routes: vec![]
-    };
+        routes: Vec::new()
+    }.make_current();
+    let mode = Config::current().mode;
 
     const INPUT_POLL_RATE : u64 = 100;
 
@@ -83,8 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt_to_gui_tx = to_gui_tx.clone();
 
     let input_thread = {
-        let mode = config.mode;
-        if mode == Mode::Interactive {
+        if Mode::Interactive == mode {
             enable_raw_mode().expect("Failed to set raw mode");
         }
         let input_builder = thrBuilder::new().name("Input".into());
@@ -108,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    let gui_thread = match config.mode {
+    let gui_thread = match Config::current().mode {
         Mode::Interactive => {
             start_gui(
                 Settings {
@@ -120,7 +112,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Headless => Err(Error::new(ErrorKind::Other, "GUI not available in Headless mode"))
     };
 
+    // let rt_config = config.clone();
+    // let rts : Vec<&Route>= config.routes.iter().map(|route|route).collect();
     let _runtime_thread = {
+        let runtime = rtBuilder::new_multi_thread()
+            .enable_io()
+            .enable_time()
+            .on_thread_start(|| {
+                println!("Async runtime thread started.");
+            }).build().unwrap();
+        let _guard = runtime.enter();
+
         let rt_builder = thrBuilder::new().name("Runtime".into());
         rt_builder.spawn(move || {
             runtime.block_on(start_runtime_task(rt_rx, rt_to_gui_tx));
@@ -131,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if _runtime_thread.is_ok() {
         _runtime_thread.unwrap().join().expect("Could not join on the associated thread, Runtime");
     }
-    if Mode::Interactive == config.mode {
+    if Mode::Interactive == mode {
         if let Ok(gui) = gui_thread {
             gui.join().expect("Could not join on the associated thread, GUI");
         }

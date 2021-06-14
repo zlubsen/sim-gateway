@@ -57,7 +57,7 @@ fn keycode_to_char(keycode : KeyCode) -> Result<char, ()> {
 }
 
 pub fn parse_command(input : &str) -> Command {
-    let mut tokens = input.split_whitespace();
+    let tokens = input.split_whitespace();
 
     for token in tokens {
         return match token {

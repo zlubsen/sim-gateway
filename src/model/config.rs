@@ -1,9 +1,9 @@
 use strum::EnumString;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use crate::model::arguments::Arguments;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub mode : Mode,
     pub routes : Vec<Route>,
@@ -35,8 +35,19 @@ impl Default for Mode {
     fn default() -> Self { Mode::Interactive }
 }
 
-#[derive(Clone)]
+impl From<&str> for Mode {
+    fn from(val: &str) -> Self {
+        return match val {
+            "interactive" => Self::Interactive,
+            "headless" => Self::Headless,
+            _ => Self::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Route {
+    pub name : String,
     pub in_point : EndPoint,
     pub out_point : EndPoint,
     pub buffer_size : usize,
@@ -47,8 +58,9 @@ pub struct Route {
 }
 
 impl Route {
-    pub fn new(in_point : EndPoint, out_point : EndPoint, buffer_size : usize, flow_mode : FlowMode) -> Route {
+    pub fn new(name : String, in_point : EndPoint, out_point : EndPoint, buffer_size : usize, flow_mode : FlowMode) -> Route {
         return Route {
+            name,
             in_point,
             out_point,
             buffer_size,
@@ -57,17 +69,50 @@ impl Route {
     }
 }
 
+// #[derive(Clone, Debug)]
+// pub enum EndPointType {
+//     UdpListen {
+//         socket: SocketAddr,
+//     },
+//     UdpSend {
+//         socket : SocketAddr,
+//         cast_type : UdpCastType,
+//     },
+//     TcpServer {
+//         socket : SocketAddr,
+//     },
+//     TcpClient {
+//         socket : SocketAddr,
+//     },
+// }
+
 #[derive(Clone, Debug)]
 pub struct EndPoint {
-    pub ip : Ipv4Addr,
-    pub port : u16,
-    pub protocol : ProtocolType,
+    pub socket : SocketAddr,
+    pub scheme: Scheme,
+    pub udp_cast_type : Option<UdpCastType>,
 }
 
 #[derive(Clone, Debug)]
-pub enum ProtocolType {
-    UDP(UdpCastType),
+pub enum Scheme {
+    UDP,
     TCP,
+}
+
+impl Default for Scheme {
+    fn default() -> Self {
+        Scheme::UDP
+    }
+}
+
+impl From<&str> for Scheme {
+    fn from(val: &str) -> Self {
+        return match val {
+            "udp" => Self::UDP,
+            "tcp" => Self::TCP,
+            _ => Self::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -90,13 +135,3 @@ thread_local! {
 pub fn merge(file_args: &Config, cli_args : &Config) -> Config {
     unimplemented!( )
 }
-
-// trait Filter {
-//     fn new() -> Self;
-//     fn apply(&self) -> bool;
-// }
-//
-// trait Transform {
-//     fn new() -> Self;
-//     fn apply(&self) -> &self;
-// }

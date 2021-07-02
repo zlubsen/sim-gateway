@@ -7,21 +7,25 @@ version = "0.1"
 
 [[routes]]
 name = "first"
-in_point = "192.168.8.158:3001/udp/unicast"
-out_point = "192.168.8.255:3000/udp/broadcast"
+in_point = "udp://192.168.8.158:3001"
+in_point_cast_type = "Unicast"
+out_point = "udp://192.168.8.255:3000"
+out_point_cast_type = "Broadcast"
 buffer_size = 32768
 flow_mode = "bidirectional"
 enabled = true
 
 [[routes]]
 name = "second"
-in_point = "192.168.8.158:3001/udp/unicast"
-out_point = "192.168.8.200:3000/tcp"
+in_point = "udp://192.168.8.158:3001"
+in_point_cast_type = "Unicast"
+out_point = "tcp://192.168.8.200:3000"
 buffer_size = 32768
 flow_mode = "unidirectional"
 enabled = false
 
 [[routes]]
 name = "third"
-in_point = "192.168.8.158:3001/udp/unicast"
-out_point = "192.168.8.200:3000/tcp"
+in_point = "udp://192.168.8.158:3001"
+in_point_cast_type = "Unicast"
+out_point = "tcp://192.168.8.200:3000"

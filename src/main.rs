@@ -29,6 +29,7 @@ use crate::model::config::*;
 
 use toml;
 use std::fs::File;
+use crate::model::from_arguments;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -59,7 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = String::new();
         file.read_to_string(&mut buffer)?;
         let arguments : Arguments = toml::from_str(buffer.as_str()).unwrap();
-        trace!("Args:\n{:?}", arguments)
+        trace!("Args:\n{:?}", arguments);
+
+        let config = from_arguments(arguments);
+        trace!("conf:\n{:?}", config);
     }
 
     Config {

@@ -12,7 +12,7 @@ use tokio::io::ErrorKind;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::events::Command;
-use crate::model::config::ProtocolType::UDP;
+use crate::model::config::Scheme::UDP;
 use crate::model::config::{EndPoint, UdpCastType, Route, Config};
 use crate::model::config::UdpCastType::{Unicast, Broadcast};
 
@@ -45,8 +45,8 @@ async fn start_routes(gui_tx : BlockingSender<Command>) {
 }
 
 async fn start_route(route : Route) {
-    let src_addr : SocketAddr = format!("{}:{}", route.in_point.ip, route.in_point.port).parse().expect("Error parsing incoming Endpoint.");
-    let dst_addr = format!("{}:{}", route.out_point.ip, route.out_point.port).parse().expect("Error parsing outgoing Endpoint.");
+    let src_addr : SocketAddr = route.in_point.socket;
+    let dst_addr = route.out_point.socket;
 
     debug!("Left point: {:?}", route.in_point);
     debug!("Right point: {:?}", route.out_point);
@@ -79,13 +79,13 @@ async fn start_route(route : Route) {
 }
 
 async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
-    let addr : SocketAddr = format!("{}:{}", endpoint.ip, endpoint.port).parse().expect("Error parsing Endpoint.");
+    let addr : SocketAddr = endpoint.socket;
     let socket = UdpSocket::bind(addr).await.expect("Error binding Endpoint.");
     socket.connect(addr).await.expect("Error connecting Endpoint.");
-    if let UDP(cast_type) = &endpoint.protocol {
-        if UdpCastType::Broadcast == cast_type.to_owned() {
-            socket.set_broadcast(true).expect(format!("Failed to set socket to broadcast {:?}", socket).as_str());
-        }
-    }
+    // if let UDP(cast_type) = &endpoint.protocol {
+    //     if UdpCastType::Broadcast == cast_type.to_owned() {
+    //         socket.set_broadcast(true).expect(format!("Failed to set socket to broadcast {:?}", socket).as_str());
+    //     }
+    // }
     socket
 }

@@ -29,7 +29,7 @@ use crate::model::config::*;
 
 use toml;
 use std::fs::File;
-use crate::model::from_arguments;
+use std::convert::TryFrom;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let arguments : Arguments = toml::from_str(buffer.as_str()).unwrap();
         trace!("Args:\n{:?}", arguments);
 
-        let config = from_arguments(arguments);
+        let config = Config::try_from(&arguments);
         trace!("conf:\n{:?}", config);
     }
 

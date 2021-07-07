@@ -8,7 +8,6 @@ version = "0.1"
 [[routes]]
 name = "first"
 in_point = "udp://192.168.8.158:3001"
-in_point_cast_type = "Unicast"
 out_point = "udp://192.168.8.255:3000"
 out_point_cast_type = "Broadcast"
 buffer_size = 32768

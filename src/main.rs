@@ -4,7 +4,7 @@ pub mod runtime;
 pub mod model;
 
 use log::{error, warn, info, debug, trace};
-use env_logger::init;
+use env_logger;
 
 extern crate clap;
 use clap::{Arg, App};
@@ -59,11 +59,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::open(config_file)?;
         let mut buffer = String::new();
         file.read_to_string(&mut buffer)?;
-        let arguments : Arguments = toml::from_str(buffer.as_str()).unwrap();
+        // TODO return / exit with clean error message
+        let arguments : Arguments = toml::from_str(buffer.as_str())?;
         trace!("Args:\n{:?}", arguments);
 
         let config = Config::try_from(&arguments);
-        trace!("conf:\n{:?}", config);
+        trace!("conf:\n{:?}", config.unwrap());
     }
 
     Config {
@@ -122,9 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let runtime = rtBuilder::new_multi_thread()
             .enable_io()
             .enable_time()
-            .on_thread_start(|| {
-                println!("Async runtime thread started.");
-            }).build().unwrap();
+            // .on_thread_start(|| {
+            //     println!("Async runtime thread started.");
+            // })
+            .build().unwrap();
         let _guard = runtime.enter();
 
         let rt_builder = thrBuilder::new().name("Runtime".into());

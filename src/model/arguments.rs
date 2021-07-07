@@ -18,7 +18,9 @@ pub struct MetaData {
 pub struct RouteSpec {
     pub name: String,
     pub in_point: String,
+    pub in_point_cast_type : Option<String>,
     pub out_point: String,
+    pub out_point_cast_type : Option<String>,
     pub buffer_size: Option<u64>,
     pub flow_mode : Option<String>,
     pub enabled: Option<bool>,

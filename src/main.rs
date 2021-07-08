@@ -7,7 +7,7 @@ use log::{error, warn, info, debug, trace};
 use env_logger;
 
 extern crate clap;
-use clap::{Arg, App};
+use clap::{Arg, App, ArgMatches};
 
 use tokio::runtime::{Builder as rtBuilder};
 use tokio::sync::mpsc::channel as tokio_async_channel;
@@ -30,6 +30,8 @@ use crate::model::config::*;
 use toml;
 use std::fs::File;
 use std::convert::TryFrom;
+
+const INPUT_POLL_RATE : u64 = 100;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -54,26 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .help("Enable interactive CLI mode"))
         .get_matches();
 
-    if let Some(config_file) = arg_matches.value_of("config") {
-        info!("Read arguments from file {}", config_file);
-        let mut file = File::open(config_file)?;
-        let mut buffer = String::new();
-        file.read_to_string(&mut buffer)?;
-        // TODO return / exit with clean error message
-        let arguments : Arguments = toml::from_str(buffer.as_str())?;
-        trace!("Args:\n{:?}", arguments);
+    get_config(&arg_matches).unwrap().make_current();
 
-        let config = Config::try_from(&arguments);
-        trace!("conf:\n{:?}", config.unwrap());
-    }
-
-    Config {
-        mode: if arg_matches.is_present("interactive") { Mode::Interactive } else { Mode::Headless },
-        routes: Vec::new()
-    }.make_current();
     let mode = Config::current().mode;
-
-    const INPUT_POLL_RATE : u64 = 100;
 
     let (to_rt_tx, rt_rx) = tokio_async_channel(10);
     let gui_to_rt_tx = to_rt_tx.clone();
@@ -149,4 +134,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::Error>> {
+    let config_from_args = if let Some(config_file) = arg_matches.value_of("config") {
+        info!("Read arguments from file {}", config_file);
+        let mut file = File::open(config_file)?;
+        let mut buffer = String::new();
+        file.read_to_string(&mut buffer)?;
+        // TODO return / exit with clean error message
+        let arguments : Arguments = toml::from_str(buffer.as_str())?;
+        trace!("Args:\n{:?}", arguments);
+
+        let config = Config::try_from(&arguments)?;
+        trace!("Config:\n{:?}", config);
+
+        Some(config)
+    } else { None };
+
+    let config_from_cli = if arg_matches.is_present("interactive") {
+        Some(Config {
+            mode: Mode::Interactive,
+            routes: Vec::new(),
+        })
+    } else { None };
+
+    let config = merge_configs(config_from_args, config_from_cli);
+    // trace!("Config:\n{:?}", config);
+    // std::thread::sleep(std::time::Duration::from_secs(10));
+    Ok(config)
 }

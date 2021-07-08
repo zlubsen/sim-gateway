@@ -1,4 +1,5 @@
-# mode = "interactive"
+#mode = "Interactive"
+mode = "Headless"
 
 [metadata]
 name = "Sample Routes"

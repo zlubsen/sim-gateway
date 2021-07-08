@@ -4,10 +4,11 @@ use std::sync::{Arc, RwLock};
 use crate::model::arguments::{Arguments, RouteSpec};
 use std::str::FromStr;
 use std::convert::TryFrom;
-
-use log::{error, warn, info, debug, trace};
 use std::fmt::{Display, Formatter};
 use std::fmt;
+use std::error::Error;
+
+use log::{error, warn, info, debug, trace};
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -15,6 +16,9 @@ pub enum ConfigError {
     RouteError(String),
     EndPointError(String),
     SchemeError(String),
+}
+
+impl Error for ConfigError {
 }
 
 impl Display for ConfigError {
@@ -54,10 +58,13 @@ impl TryFrom<&Arguments> for Config {
     type Error = ConfigError;
 
     fn try_from(args: &Arguments) -> Result<Self, Self::Error> {
+        trace!("mode in args: {:?}", args.mode);
+        // std::thread::sleep(std::time::Duration::from_millis(5000));
         let mode = match &args.mode {
             Some(mode_arg) => Mode::from_str(mode_arg).unwrap(),
             None => Mode::default(),
         };
+        trace!("mode as val: {:?}", mode);
 
         let parsed_routes : Vec<Result<Route, Self::Error>> = args.routes.iter()
             .map(|route_spec| { Route::try_from(route_spec) } ).collect();
@@ -83,7 +90,7 @@ pub enum Mode {
 }
 
 impl Default for Mode {
-    fn default() -> Self { Mode::Interactive }
+    fn default() -> Self { Mode::Headless }
 }
 
 // impl FromStr for Mode {
@@ -285,6 +292,16 @@ thread_local! {
     static CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
 }
 
-pub fn merge(file_args: &Config, cli_args : &Config) -> Config {
-    unimplemented!( )
+
+pub fn merge_configs(file_args: Option<Config>, cli_args : Option<Config>) -> Config {
+    if file_args.is_some() && cli_args.is_some() {
+        Config {
+            mode : cli_args.unwrap().mode,
+            routes : file_args.unwrap().routes,
+        }
+    } else if file_args.is_some() && cli_args.is_none() {
+        file_args.unwrap()
+    } else if file_args.is_none() && cli_args.is_some() {
+        cli_args.unwrap()
+    } else { Config::default() }
 }

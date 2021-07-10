@@ -1,6 +1,7 @@
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
+use crate::model::arguments::RouteSpec;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
     None,
     Up,
@@ -12,6 +13,12 @@ pub enum Command {
     Key(char),
     Backspace,
     Quit,
+    // RoutePauseAll,
+    // RoutePause(usize),
+    // RouteResumeAll,
+    // RouteResume(usize),
+    // RouteCreate(RouteSpec),
+    // RouteDelete(usize),
 }
 
 impl From<KeyEvent> for Command {
@@ -56,6 +63,8 @@ fn keycode_to_char(keycode : KeyCode) -> Result<char, ()> {
     }
 }
 
+// TODO impl parse / FromStr
+// TODO use nom package
 pub fn parse_command(input : &str) -> Command {
     let tokens = input.split_whitespace();
 
@@ -68,4 +77,10 @@ pub fn parse_command(input : &str) -> Command {
     };
 
     Command::None
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    StatBytesReceived(usize, i32), // route ID and #bytes
+    StatBytesSend(usize, i32), // route ID and #bytes
 }

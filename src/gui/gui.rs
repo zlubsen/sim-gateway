@@ -1,6 +1,8 @@
-use std::sync::mpsc::Receiver;
 use std::thread::{Builder, JoinHandle};
 use std::io::{stdout, Error};
+use std::time::Duration;
+
+use tokio::sync::broadcast::{Sender, Receiver};
 
 use crossterm::{
     event::{self, Event as CEvent, KeyCode, KeyEvent},
@@ -9,7 +11,7 @@ use crossterm::{
 
 use tui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
     widgets::{
@@ -18,10 +20,9 @@ use tui::{
     Terminal,
 };
 
-use crate::events::{Command, parse_command};
-use std::time::Duration;
-use tokio::sync::mpsc::Sender;
-use tui::layout::Rect;
+use log::{debug};
+
+use crate::events::{Command, parse_command, Event};
 use crate::model::config::Config;
 
 const RENDER_RATE : Duration = Duration::from_millis(1000);
@@ -31,7 +32,7 @@ struct App {
     active_area : Area,
     prompt : String,
     kill_signal : bool,
-    to_rt_tx : Sender<Command>,
+    command_tx : Sender<Command>,
 }
 
 enum State {
@@ -52,7 +53,6 @@ impl App {
         match command {
             Command::Quit => {
                 self.kill_signal = true;
-                self.to_rt_tx.blocking_send(Command::Quit);
             }
             Command::Key(char) => {
                 self.prompt.push(char);
@@ -65,7 +65,7 @@ impl App {
                     Area::Prompt => {
                         let prompt_cmd = parse_command(self.prompt.as_str());
                         self.prompt.clear();
-                        self.handle_command(prompt_cmd);
+                        self.command_tx.send(prompt_cmd);
                     }
                     _ => {}
                 }
@@ -85,12 +85,12 @@ impl App {
     }
 }
 
-pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>) -> Result<JoinHandle<()>, Error> {
+pub fn start_gui(mut command_rx: Receiver<Command>, command_tx : Sender<Command>, mut data_rx: Receiver<Event>) -> Result<JoinHandle<()>, Error> {
     let mut app = App {
         active_area : Area::Prompt,
         prompt : String::default(),
         kill_signal : false,
-        to_rt_tx : tx,
+        command_tx
     };
 
     let gui_builder = Builder::new().name("GUI".into());
@@ -179,9 +179,16 @@ pub fn start_gui(settings: Settings, rx: Receiver<Command>, tx: Sender<Command>)
                 // rect.render_widget(middle_chunks, chunks[1]);
             }).unwrap();
 
-            // handle inputs
-            if let Ok(command) = rx.recv_timeout(RENDER_RATE) {
+            // handle inputs from other threads
+            // TODO handle refresh rate with a sleep or so.
+            if let Ok(command) = command_rx.try_recv() {
                 app.handle_command(command);
+            }
+
+            // handle incoming data
+            match data_rx.try_recv() {
+                Ok(event) => { debug!("gui received event: {:?}", event) }
+                Err(err) => { debug!("gui data_rx.try_recv() gave an error {:?}", err)}
             }
         }
         disable_raw_mode().unwrap();

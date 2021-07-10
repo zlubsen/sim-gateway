@@ -1,38 +1,41 @@
-use log::{error, info, debug};
-
-use std::sync::mpsc::Sender as BlockingSender;
+use log::{error, info, debug, trace};
 
 use std::net::{Ipv4Addr, SocketAddr};
 
 use tokio::time::{Duration, interval};
-use tokio::sync::mpsc::Receiver;
 use tokio::net::UdpSocket;
 use tokio::io::ErrorKind;
 
+use tokio::sync::broadcast::{Receiver, Sender};
+
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::events::Command;
+use crate::events::{Command, Event};
 use crate::model::config::Scheme::UDP;
 use crate::model::config::{EndPoint, UdpCastType, Route, Config};
 use crate::model::config::UdpCastType::{Unicast, Broadcast};
 
 pub const DEFAULT_ROUTE_BUFFER_SIZE : usize = 1024;
 
-pub async fn start_runtime_task(mut rt_rx: Receiver<Command>, to_gui_tx : BlockingSender<Command>) {
+pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Sender<Event>) {
     // spawn gateway main task
-    let _main_task = tokio::spawn(start_routes(to_gui_tx));
+    let _main_task = tokio::spawn(start_routes(data_tx));
 
-    while let Some(command) = rt_rx.recv().await {
-        match command {
-            Command::Quit => {
-                break;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let recv = command_rx.try_recv();
+        if let Ok(command) = recv {
+            match command {
+                Command::Quit => {
+                    break;
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
 
-async fn start_routes(gui_tx : BlockingSender<Command>) {
+async fn start_routes(data_tx : Sender<Event>) {
     // let mut interval = interval(Duration::from_secs(2));
     // loop {
     //     interval.tick().await;
@@ -62,7 +65,7 @@ async fn start_route(route : Route) {
 
         debug!("Received {} bytes from {}.", len, addr);
 
-        match in_socket.try_send_to(&buf[..len], dst_addr) {
+        match out_socket.try_send_to(&buf[..len], dst_addr) {
             Ok(n) => {
                 break;
             }

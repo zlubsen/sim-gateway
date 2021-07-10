@@ -23,7 +23,6 @@ use tui::{
 use log::{debug};
 
 use crate::events::{Command, parse_command, Event};
-use crate::model::config::Config;
 
 const RENDER_RATE : Duration = Duration::from_millis(1000);
 const PROMPT_START : &str = " $ ";
@@ -65,7 +64,7 @@ impl App {
                     Area::Prompt => {
                         let prompt_cmd = parse_command(self.prompt.as_str());
                         self.prompt.clear();
-                        self.command_tx.send(prompt_cmd);
+                        let _result = self.command_tx.send(prompt_cmd);
                     }
                     _ => {}
                 }

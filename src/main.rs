@@ -21,7 +21,6 @@ use crossterm::{
 
 use std::io::{Error, ErrorKind, Read};
 use std::thread::{Builder as thrBuilder};
-use std::sync::mpsc::channel as std_sync_channel;
 use std::fs::File;
 use std::convert::TryFrom;
 
@@ -68,8 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // let (command_tx, command_rx) = bounded(10);
     // let (data_tx, data_rx) = bounded(100);
-    let (command_tx, mut command_rx) = channel(10);
-    let (data_tx, mut data_rx) = channel(100);
+    let (command_tx, command_rx) = channel(10);
+    let (data_tx, data_rx) = channel(100);
 
     let input_thread = {
         if Mode::Interactive == mode {
@@ -101,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Command::Quit => break,
                         Command::Key('q') => {
                             if mode == Mode::Headless {
-                                command_tx_input.send(Command::Quit);
+                                let _result = command_tx_input.send(Command::Quit);
                             }
                         },
                         _ => {}
@@ -113,9 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // let command_rx_gui = command_rx.clone();
     // let data_rx_gui = data_rx.clone();
-    let mut command_rx_gui = command_tx.subscribe();
+    let command_rx_gui = command_tx.subscribe();
     let command_tx_gui = command_tx.clone();
-    let mut data_rx_gui = data_tx.subscribe();
+    let data_rx_gui = data_tx.subscribe();
     let gui_thread = match Config::current().mode {
         Mode::Interactive => {
             start_gui(

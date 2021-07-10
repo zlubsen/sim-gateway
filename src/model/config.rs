@@ -1,7 +1,7 @@
 use strum::{EnumString, IntoStaticStr};
 use std::net::{SocketAddr};
 use std::sync::{Arc, RwLock};
-use crate::model::arguments::{Arguments, RouteSpec};
+use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use std::str::FromStr;
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
@@ -9,6 +9,10 @@ use std::fmt;
 use std::error::Error;
 
 use log::{error, warn, info, debug, trace};
+
+thread_local! {
+    static CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
+}
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -58,13 +62,10 @@ impl TryFrom<&Arguments> for Config {
     type Error = ConfigError;
 
     fn try_from(args: &Arguments) -> Result<Self, Self::Error> {
-        trace!("mode in args: {:?}", args.mode);
-        // std::thread::sleep(std::time::Duration::from_millis(5000));
         let mode = match &args.mode {
             Some(mode_arg) => Mode::from_str(mode_arg).unwrap(),
             None => Mode::default(),
         };
-        trace!("mode as val: {:?}", mode);
 
         let parsed_routes : Vec<Result<Route, Self::Error>> = args.routes.iter()
             .map(|route_spec| { Route::try_from(route_spec) } ).collect();
@@ -93,29 +94,6 @@ impl Default for Mode {
     fn default() -> Self { Mode::Headless }
 }
 
-// impl FromStr for Mode {
-//     type Err = &'static str;
-//
-//     fn from_str(value: &str) -> Result<Self, Self::Err> {
-//         return match value {
-//             "interactive" => Ok(Self::Interactive),
-//             "headless" => Ok(Self::Headless),
-//             _ => Self::Err("Error parsing mode '{}'", value),
-//         }
-//     }
-// }
-
-// // TODO replace with strum?
-// impl From<&str> for Mode {
-//     fn from(val: &str) -> Self {
-//         return match val {
-//             "interactive" => Self::Interactive,
-//             "headless" => Self::Headless,
-//             _ => Self::default(),
-//         }
-//     }
-// }
-
 #[derive(Debug, Clone)]
 pub struct Route {
     pub name : String,
@@ -124,9 +102,6 @@ pub struct Route {
     pub buffer_size : usize,
     pub flow_mode : FlowMode,
     pub enabled : bool,
-    // filters_in : Vec<Filter>,
-    // filters_out : Vec<Filter>,
-    // transforms : Vec<Transform>
 }
 
 impl Route {
@@ -147,14 +122,14 @@ impl TryFrom<&RouteSpec> for Route {
 
     fn try_from(spec: &RouteSpec) -> Result<Self, Self::Error> {
         let name = String::from(spec.name.as_str()); // TODO name cannot be empty string
-        let in_point = EndPoint::try_from(spec.in_point.as_str())?;
-        let in_point = if let Some(cast_type) = &spec.in_point_cast_type {
-            in_point.add_cast_type(cast_type)?
-        } else { in_point };
-        let out_point = EndPoint::try_from(spec.out_point.as_str())?;
-        let out_point = if let Some(cast_type) = &spec.out_point_cast_type {
-            out_point.add_cast_type(cast_type)?
-        } else { out_point };
+        let in_point = EndPoint::try_from(&spec.in_point)?;
+        // let in_point = if let Some(cast_type) = &spec.in_point_cast_type {
+        //     in_point.add_cast_type(cast_type)?
+        // } else { in_point };
+        let out_point = EndPoint::try_from(&spec.out_point)?;
+        // let out_point = if let Some(cast_type) = &spec.out_point_cast_type {
+        //     out_point.add_cast_type(cast_type)?
+        // } else { out_point };
         let buffer_size = spec.buffer_size.unwrap_or(32768) as usize;
 
         let flow_mode = if let Some(val) = &spec.flow_mode {
@@ -178,66 +153,81 @@ impl TryFrom<&RouteSpec> for Route {
     }
 }
 
-// #[derive(Clone, Debug)]
-// pub enum EndPointType {
-//     UdpListen {
-//         socket: SocketAddr,
-//     },
-//     UdpSend {
-//         socket : SocketAddr,
-//         cast_type : UdpCastType,
-//     },
-//     TcpServer {
-//         socket : SocketAddr,
-//     },
-//     TcpClient {
-//         socket : SocketAddr,
-//     },
-// }
-
 #[derive(Clone, Debug)]
 pub struct EndPoint {
     pub socket : SocketAddr,
     pub scheme: Scheme,
-    pub udp_cast_type : UdpCastType,
+    pub socket_type: SocketType,
 }
 
-impl TryFrom<&str> for EndPoint {
+impl TryFrom<&EndPointSpec> for EndPoint {
     type Error = ConfigError;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let (scheme_val, socket_address_val) : (&str, &str) = match value.split_once("://") {
+    fn try_from(spec: &EndPointSpec) -> Result<Self, Self::Error> {
+        let (scheme_val, socket_address_val): (&str, &str) = match spec.uri.split_once("://") {
             Some((val, tail)) => (val, tail),
-            None => (Scheme::default().into(), value),
+            None => (Scheme::default().into(), &*spec.uri),
         };
-        let scheme : Scheme = match Scheme::from_str(scheme_val) {
+        let scheme: Scheme = match Scheme::from_str(scheme_val) {
             Ok(scheme) => scheme,
-            Err(err) => return Err(ConfigError::EndPointError(format!("{} for {}", err, value))),
+            Err(err) => return Err(ConfigError::EndPointError(format!("{} for {}", err, spec.uri))),
         };
         let socket_address = match socket_address_val.parse() {
             Ok(val) => val,
             Err(err) => return Err(ConfigError::EndPointError(format!("{} for {}", err, socket_address_val)))
         };
+        let socket_type = match scheme {
+            Scheme::UDP => {
+                if let Some(kind) = &spec.kind {
+                    match UdpSocketType::from_str(kind) {
+                        Ok(val) => SocketType::UdpSocketType(val),
+                        Err(err) => return Err(ConfigError::EndPointError(format!("{} for {}", err, kind)))
+                    }
+                } else { SocketType::UdpSocketType(UdpSocketType::default()) }
+            },
+            Scheme::TCP => {
+                if let Some(kind) = &spec.kind {
+                    match TcpSocketType::from_str(kind) {
+                        Ok(val) => SocketType::TcpSocketType(val),
+                        Err(err) => return Err(ConfigError::EndPointError(format!("{} for {}", err, kind)))
+                    }
+                } else { SocketType::TcpSocketType(TcpSocketType::default()) }
+            }
+        };
 
         Ok(EndPoint {
             socket: socket_address,
             scheme,
-            udp_cast_type: UdpCastType::Unicast
+            socket_type,
         })
     }
 }
 
 impl EndPoint {
     pub fn add_cast_type(&self, value: &str) -> Result<EndPoint, ConfigError> {
-        let cast_type = match UdpCastType::from_str(value) {
-            Ok(val) => val,
-            Err(err) => return Err(ConfigError::EndPointError(format!("UdpCastType - {}", err))),
+        let socket_type = match self.scheme {
+            Scheme::UDP => {
+                SocketType::UdpSocketType(
+                    match UdpSocketType::from_str(value) {
+                        Ok(val) => val,
+                        Err(err) => return Err(ConfigError::EndPointError(format!("UdpSocketType - {}", err))),
+                    }
+                )
+            },
+            Scheme::TCP => {
+                SocketType::TcpSocketType(
+                    match TcpSocketType::from_str(value) {
+                        Ok(val) => val,
+                        Err(err) => return Err(ConfigError::EndPointError(format!("TcpSocketType - {}", err))),
+                    }
+                )
+            },
         };
 
         Ok(EndPoint {
             socket: self.socket.clone(),
             scheme: self.scheme.clone(),
-            udp_cast_type: cast_type,
+            socket_type,
         })
     }
 }
@@ -256,22 +246,35 @@ impl Default for Scheme {
     }
 }
 
-// // TODO replace with strum?
-// impl From<&str> for Scheme {
-//     fn from(val: &str) -> Self {
-//         return match val {
-//             "udp" => Self::UDP,
-//             "tcp" => Self::TCP,
-//             _ => Self::default(),
-//         }
-//     }
-// }
+#[derive(Clone, Debug, PartialEq, EnumString)]
+pub enum SocketType {
+    UdpSocketType(UdpSocketType),
+    TcpSocketType(TcpSocketType),
+}
 
 #[derive(Clone, Debug, PartialEq, EnumString)]
-pub enum UdpCastType {
+pub enum UdpSocketType {
     Unicast,
     Broadcast,
     Multicast,
+}
+
+impl Default for UdpSocketType {
+    fn default() -> Self {
+        UdpSocketType::Unicast
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, EnumString)]
+pub enum TcpSocketType {
+    Server,
+    Client,
+}
+
+impl Default for TcpSocketType {
+    fn default() -> Self {
+        TcpSocketType::Server
+    }
 }
 
 #[derive(Clone, Debug, EnumString)]
@@ -287,11 +290,6 @@ impl Default for FlowMode {
         FlowMode::UniDirectional
     }
 }
-
-thread_local! {
-    static CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
-}
-
 
 pub fn merge_configs(file_args: Option<Config>, cli_args : Option<Config>) -> Config {
     if file_args.is_some() && cli_args.is_some() {

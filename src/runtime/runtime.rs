@@ -1,19 +1,13 @@
-use log::{error, info, debug, trace};
-
 use std::net::{Ipv4Addr, SocketAddr};
 
-use tokio::time::{Duration, interval};
-use tokio::net::UdpSocket;
+use log::{debug, error, info, trace};
 use tokio::io::ErrorKind;
-
+use tokio::net::UdpSocket;
 use tokio::sync::broadcast::{Receiver, Sender};
-
-use crossterm::event::{KeyCode, KeyEvent};
+use tokio::time::Duration;
 
 use crate::events::{Command, Event};
-use crate::model::config::Scheme::UDP;
-use crate::model::config::{EndPoint, UdpCastType, Route, Config};
-use crate::model::config::UdpCastType::{Unicast, Broadcast};
+use crate::model::config::*;
 
 pub const DEFAULT_ROUTE_BUFFER_SIZE : usize = 1024;
 
@@ -36,12 +30,6 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
 }
 
 async fn start_routes(data_tx : Sender<Event>) {
-    // let mut interval = interval(Duration::from_secs(2));
-    // loop {
-    //     interval.tick().await;
-    //     gui_tx.send(Command::None).expect("Failure of sending Runtime Command to GUI task."); // no-op for now, to show a sign of life
-    // }
-
     Config::current().routes.iter().for_each(|route| {
         tokio::spawn( start_route(route.clone()));
     });
@@ -66,15 +54,15 @@ async fn start_route(route : Route) {
         debug!("Received {} bytes from {}.", len, addr);
 
         match out_socket.try_send_to(&buf[..len], dst_addr) {
-            Ok(n) => {
+            Ok(_numbyte) => {
                 break;
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+            Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 continue;
             }
-            Err(e) => {
+            Err(err) => {
                 // return Err(e);
-                error!("{}", e);
+                error!("{}", err);
                 break;
             }
         }

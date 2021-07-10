@@ -1,5 +1,4 @@
 use crossterm::event::{KeyEvent, KeyCode, KeyModifiers};
-use crate::model::arguments::RouteSpec;
 
 #[derive(Debug, Clone)]
 pub enum Command {

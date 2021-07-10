@@ -6,26 +6,37 @@ name = "Sample Routes"
 author = "Zeeger"
 version = "0.1"
 
+# normal notation
+#[[routes]]
+#name = "tcp-udp-normal"
+#buffer_size = 32768
+#flow_mode = "bidirectional"
+#enabled = true
+#[routes.in_point]
+#uri = "tcp://192.168.8.158:3001"
+#kind = "Server"
+#[routes.out_point]
+#uri = "udp://192.168.8.255:3000"
+#kind = "Broadcast"
+
+# inline table notation
 [[routes]]
 name = "first"
-in_point = "udp://192.168.8.158:3001"
-out_point = "udp://192.168.8.255:3000"
-out_point_cast_type = "Broadcast"
+in_point = { uri = "udp://192.168.8.158:3001" }
+out_point = { uri = "udp://192.168.8.255:3000", kind = "Broadcast" }
 buffer_size = 32768
 flow_mode = "bidirectional"
 enabled = true
 
 [[routes]]
 name = "second"
-in_point = "udp://192.168.8.158:3001"
-in_point_cast_type = "Unicast"
-out_point = "tcp://192.168.8.200:3000"
+in_point = { uri = "udp://192.168.8.158:3001", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.200:3000" }
 buffer_size = 32768
 flow_mode = "unidirectional"
 enabled = false
 
 [[routes]]
 name = "third"
-in_point = "udp://192.168.8.158:3001"
-in_point_cast_type = "Unicast"
-out_point = "tcp://192.168.8.200:3000"
+in_point = { uri = "udp://192.168.8.158:3001", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.200:3000" }

@@ -17,11 +17,17 @@ pub struct MetaData {
 #[derive(Debug, Deserialize)]
 pub struct RouteSpec {
     pub name: String,
-    pub in_point: String,
-    pub in_point_cast_type : Option<String>,
-    pub out_point: String,
-    pub out_point_cast_type : Option<String>,
+    pub in_point: EndPointSpec,
+    // pub in_point_type : Option<String>,
+    pub out_point: EndPointSpec,
+    // pub out_point_type : Option<String>,
     pub buffer_size: Option<u64>,
     pub flow_mode : Option<String>,
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EndPointSpec {
+    pub uri: String,
+    pub kind: Option<String>,
 }

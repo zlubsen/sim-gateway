@@ -153,11 +153,14 @@ impl TryFrom<&RouteSpec> for Route {
     }
 }
 
+const DEFAULT_TTL : u8 = 64; // default for unix and mac
+
 #[derive(Clone, Debug)]
 pub struct EndPoint {
     pub socket : SocketAddr,
     pub scheme: Scheme,
     pub socket_type: SocketType,
+    pub ttl: u32,
 }
 
 impl TryFrom<&EndPointSpec> for EndPoint {
@@ -194,40 +197,15 @@ impl TryFrom<&EndPointSpec> for EndPoint {
                 } else { SocketType::TcpSocketType(TcpSocketType::default()) }
             }
         };
+        let ttl = if let Some(ttl_val) = spec.ttl {
+            ttl_val
+        } else { DEFAULT_TTL };
 
         Ok(EndPoint {
             socket: socket_address,
             scheme,
             socket_type,
-        })
-    }
-}
-
-impl EndPoint {
-    pub fn add_cast_type(&self, value: &str) -> Result<EndPoint, ConfigError> {
-        let socket_type = match self.scheme {
-            Scheme::UDP => {
-                SocketType::UdpSocketType(
-                    match UdpSocketType::from_str(value) {
-                        Ok(val) => val,
-                        Err(err) => return Err(ConfigError::EndPointError(format!("UdpSocketType - {}", err))),
-                    }
-                )
-            },
-            Scheme::TCP => {
-                SocketType::TcpSocketType(
-                    match TcpSocketType::from_str(value) {
-                        Ok(val) => val,
-                        Err(err) => return Err(ConfigError::EndPointError(format!("TcpSocketType - {}", err))),
-                    }
-                )
-            },
-        };
-
-        Ok(EndPoint {
-            socket: self.socket.clone(),
-            scheme: self.scheme.clone(),
-            socket_type,
+            ttl,
         })
     }
 }

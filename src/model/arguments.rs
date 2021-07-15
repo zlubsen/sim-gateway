@@ -30,4 +30,5 @@ pub struct RouteSpec {
 pub struct EndPointSpec {
     pub uri: String,
     pub kind: Option<String>,
+    pub ttl: Option<u32>,
 }

@@ -378,6 +378,7 @@ dependencies = [
 name = "sim-gateway"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "crossterm 0.19.0",
  "env_logger",

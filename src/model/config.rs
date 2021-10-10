@@ -1,5 +1,5 @@
 use strum::{EnumString, IntoStaticStr};
-use std::net::{SocketAddr};
+use std::net::{SocketAddrV4};
 use std::sync::{Arc, RwLock};
 use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use std::str::FromStr;
@@ -36,7 +36,7 @@ impl Display for ConfigError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub mode : Mode,
     pub routes : Vec<Route>,
@@ -46,9 +46,10 @@ impl Config {
     pub fn current() -> Arc<Config> {
         CURRENT_CONFIG.with(|c| c.read().unwrap().clone())
     }
-    pub fn make_current(self) {
+    pub fn make_new_current(self) {
         CURRENT_CONFIG.with(|c| *c.write().unwrap() = Arc::new(self))
     }
+    pub fn make_existing_current(arc : Arc<Config>) { CURRENT_CONFIG.with(|c| *c.write().unwrap() = arc) }
 }
 
 impl Default for Config {
@@ -153,11 +154,11 @@ impl TryFrom<&RouteSpec> for Route {
     }
 }
 
-const DEFAULT_TTL : u8 = 64; // default for unix and mac
+const DEFAULT_TTL : u32 = 64; // default for unix and mac
 
 #[derive(Clone, Debug)]
 pub struct EndPoint {
-    pub socket : SocketAddr,
+    pub socket : SocketAddrV4,
     pub scheme: Scheme,
     pub socket_type: SocketType,
     pub ttl: u32,
@@ -255,7 +256,7 @@ impl Default for TcpSocketType {
     }
 }
 
-#[derive(Clone, Debug, EnumString)]
+#[derive(Copy, Clone, Debug, EnumString)]
 pub enum FlowMode {
     #[strum(serialize = "unidirectional")]
     UniDirectional,

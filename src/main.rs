@@ -32,8 +32,22 @@ use crate::model::config::*;
 
 const INPUT_POLL_RATE : u64 = 100;
 
+// struct Data {
+//     yes_no : bool,
+//     payload : Vec<Inner>,
+// }
+// struct Inner {
+//     a : u32,
+//     b : u32,
+// }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+
+    // let test_data = RwLock::new(Arc::new(Data {
+    //     yes_no : false,
+    //     payload : vec!(Inner {a:1,b:1}, Inner {a:1,b:2}, Inner {a:2,b:1}),
+    // }));
 
     // Read config: we expect a .toml file with the config (required for now).
     // TODO Or perhaps later most settings as separate arguments.
@@ -55,8 +69,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .help("Enable interactive CLI mode"))
         .get_matches();
 
-    get_config(&arg_matches).unwrap().make_current();
-
+    get_config(&arg_matches)?.make_new_current();
+    trace!("config in main thread:\n{:?}", Config::current());
     let mode = Config::current().mode;
 
     // // TODO replace with crossbeam channels?
@@ -80,9 +94,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // let command_rx_input = command_rx.clone();
         let command_tx_input = command_tx.clone();
         let mut command_rx_input = command_tx_input.subscribe();
-        input_builder.spawn(move || {
-            let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
+        let input_config = Config::current();
 
+        input_builder.spawn(move || {
+            Config::make_existing_current(input_config);
+            let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
+            trace!("config in input thread:\n{:?}", Config::current());
             loop {
                 // poll for user inputs
                 if event::poll(poll_rate).expect("Key event polling error") {
@@ -126,17 +143,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let _runtime_thread = {
-        let runtime = rtBuilder::new_multi_thread()
+        let runtime = rtBuilder::new_current_thread()//new_multi_thread()
             .enable_io()
             .enable_time()
-            // .on_thread_start(|| {
-            //     println!("Async runtime thread started.");
+            // .on_thread_start( || {
+            //         println!("Async runtime thread started");
             // })
             .build().unwrap();
         let _guard = runtime.enter();
 
         let rt_builder = thrBuilder::new().name("Runtime".into());
+        let rt_config = Config::current();
         rt_builder.spawn(move || {
+            Config::make_existing_current(rt_config);
             runtime.block_on(start_runtime_task(command_rx, data_tx));
             runtime.shutdown_background();
         })
@@ -185,3 +204,45 @@ fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::E
 
     Ok(config)
 }
+
+// fn start_input_thread(mode : &Mode) -> Result<JoinHandle<()>, std::io::Error> {
+//     if Mode::Interactive == mode {
+//         enable_raw_mode().expect("Failed to set raw mode");
+//     }
+//     let input_builder = thrBuilder::new().name("Input".into());
+//
+//     // let command_tx_input = command_tx.clone();
+//     // let command_rx_input = command_rx.clone();
+//     let command_tx_input = command_tx.clone();
+//     let mut command_rx_input = command_tx_input.subscribe();
+//     let config_for_input = Config::current().clone();
+//     input_builder.spawn(move || {
+//         let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
+//
+//         trace!("config in input thread:\n{:?}", Config::current());
+//         loop {
+//             // poll for user inputs
+//             if event::poll(poll_rate).expect("Key event polling error") {
+//                 if let CEvent::Key(key) = event::read().expect("Key event read error") {
+//                     trace!("user key event: {:?}", key);
+//                     let command = Command::from(key);
+//                     trace!("command to send: {:?}", command);
+//                     command_tx_input.send(command).expect("Send key event error");
+//                 }
+//             }
+//             // handle incoming commands
+//             if let Ok(command) = command_rx_input.try_recv() {
+//                 trace!("input recv command: {:?}", command);
+//                 match command {
+//                     Command::Quit => break,
+//                     Command::Key('q') => {
+//                         if mode == Mode::Headless {
+//                             let _result = command_tx_input.send(Command::Quit);
+//                         }
+//                     },
+//                     _ => {}
+//                 }
+//             }
+//         }
+//     })
+// }

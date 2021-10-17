@@ -10,8 +10,10 @@ use std::error::Error;
 
 use log::{error, warn, info, debug, trace};
 
-thread_local! {
-    static CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
 }
 
 #[derive(Debug)]
@@ -44,12 +46,11 @@ pub struct Config {
 
 impl Config {
     pub fn current() -> Arc<Config> {
-        CURRENT_CONFIG.with(|c| c.read().unwrap().clone())
+        CURRENT_CONFIG.read().unwrap().clone()
     }
     pub fn make_new_current(self) {
-        CURRENT_CONFIG.with(|c| *c.write().unwrap() = Arc::new(self))
+        *CURRENT_CONFIG.write().unwrap() = Arc::new(self)
     }
-    pub fn make_existing_current(arc : Arc<Config>) { CURRENT_CONFIG.with(|c| *c.write().unwrap() = arc) }
 }
 
 impl Default for Config {

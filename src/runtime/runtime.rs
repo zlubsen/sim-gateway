@@ -35,14 +35,22 @@ impl Display for RuntimeError {
 
 
 pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Sender<Event>) {
-    debug!("Starting runtime");
-    trace!("routes? {:?}", Config::current().routes);
-
     // spawn gateway main task
-    let _main_task = tokio::spawn(start_routes(data_tx));
+
+    // let _main_task = tokio::spawn( async move {
+    //     trace!("tokio.spawn");
+    //     start_routes(data_tx).await;
+    //     // trace!("finished start_routes");
+    // });
+    Config::current().routes.iter().for_each(|route| {
+        let r = route.clone();
+        tokio::spawn( async move {
+            start_route(r).await;
+        });
+    });
 
     loop {
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let recv = command_rx.try_recv();
         if let Ok(command) = recv {
             match command {
@@ -55,34 +63,12 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
     }
 }
 
-async fn start_routes(data_tx : Sender<Event>) {
-    debug!("routes? {:?}", Config::current().routes);
-    Config::current().routes.iter().for_each(|route| {
-        debug!("spawning route {}", route.name);
-        tokio::spawn( start_route(route.clone()));
-    });
-}
-
 async fn start_route(route : Route) {
+    debug!("spawning route {}", route.name);
     // create separate endpoints, preferable generic
     // receive from the in_point, or both if bidirectional
     // allow for transformations after receiving
     // write to the out_point, or both if bidirectional
-
-    // let receiver = UdpReceiver {
-    //     socket : UdpSocket::bind(
-    //         SocketAddrV4::new(Ipv4Addr::UNSPECIFIED,
-    //                           route.in_point.socket.port())
-    //     ).await.expect("Error creating UdpSocket")
-    // };
-    // let sender = UdpSender {
-    //     socket : UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED,
-    //                                                route.out_point.socket.port())
-    //     ).await.expect("Error creating UdpSocket"),
-    //     destination : route.out_point.socket,
-    // };
-
-    debug!("Creating routes");
 
     match (&route.in_point.scheme, &route.out_point.scheme) {
         (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(&route).await; }

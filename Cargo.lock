@@ -403,6 +403,7 @@ dependencies = [
  "clap",
  "crossterm 0.21.0",
  "env_logger",
+ "lazy_static",
  "log",
  "serde",
  "serde_derive",

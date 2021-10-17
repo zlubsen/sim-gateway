@@ -23,6 +23,7 @@ use std::io::{Error, ErrorKind, Read};
 use std::thread::{Builder as thrBuilder};
 use std::fs::File;
 use std::convert::TryFrom;
+use std::sync::{Arc, RwLock};
 
 use crate::gui::{start_gui, Settings};
 use crate::runtime::{start_runtime_task};
@@ -32,22 +33,8 @@ use crate::model::config::*;
 
 const INPUT_POLL_RATE : u64 = 100;
 
-// struct Data {
-//     yes_no : bool,
-//     payload : Vec<Inner>,
-// }
-// struct Inner {
-//     a : u32,
-//     b : u32,
-// }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-
-    // let test_data = RwLock::new(Arc::new(Data {
-    //     yes_no : false,
-    //     payload : vec!(Inner {a:1,b:1}, Inner {a:1,b:2}, Inner {a:2,b:1}),
-    // }));
 
     // Read config: we expect a .toml file with the config (required for now).
     // TODO Or perhaps later most settings as separate arguments.
@@ -73,14 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     trace!("config in main thread:\n{:?}", Config::current());
     let mode = Config::current().mode;
 
-    // // TODO replace with crossbeam channels?
-    // let (to_rt_tx, rt_rx) = tokio_async_channel(10);
-    // let gui_to_rt_tx = to_rt_tx.clone();
-    // let (to_gui_tx, gui_rx) = std_sync_channel();
-    // let rt_to_gui_tx = to_gui_tx.clone();
-
-    // let (command_tx, command_rx) = bounded(10);
-    // let (data_tx, data_rx) = bounded(100);
     let (command_tx, command_rx) = channel(10);
     let (data_tx, data_rx) = channel(100);
 
@@ -94,10 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // let command_rx_input = command_rx.clone();
         let command_tx_input = command_tx.clone();
         let mut command_rx_input = command_tx_input.subscribe();
-        let input_config = Config::current();
 
         input_builder.spawn(move || {
-            Config::make_existing_current(input_config);
             let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
             trace!("config in input thread:\n{:?}", Config::current());
             loop {
@@ -116,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match command {
                         Command::Quit => break,
                         Command::Key('q') => {
-                            if mode == Mode::Headless {
+                            if Config::current().mode == Mode::Headless {
                                 let _result = command_tx_input.send(Command::Quit);
                             }
                         },
@@ -132,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command_rx_gui = command_tx.subscribe();
     let command_tx_gui = command_tx.clone();
     let data_rx_gui = data_tx.subscribe();
-    let gui_thread = match Config::current().mode {
+    let gui_thread = match mode {
         Mode::Interactive => {
             start_gui(
                 command_rx_gui,
@@ -143,20 +120,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let _runtime_thread = {
-        let runtime = rtBuilder::new_current_thread()//new_multi_thread()
+        let runtime = rtBuilder::new_multi_thread()
             .enable_io()
             .enable_time()
-            // .on_thread_start( || {
-            //         println!("Async runtime thread started");
-            // })
             .build().unwrap();
         let _guard = runtime.enter();
 
         let rt_builder = thrBuilder::new().name("Runtime".into());
-        let rt_config = Config::current();
         rt_builder.spawn(move || {
-            Config::make_existing_current(rt_config);
-            runtime.block_on(start_runtime_task(command_rx, data_tx));
+            runtime.block_on( async {start_runtime_task(command_rx, data_tx).await});
             runtime.shutdown_background();
         })
     };
@@ -176,6 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// TODO possibly convert to config_rs crate
 fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::Error>> {
     let config_from_args = if let Some(config_file) = arg_matches.value_of("config") {
         info!("Read arguments from file {}", config_file);

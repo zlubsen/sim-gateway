@@ -96,7 +96,6 @@ pub fn start_gui(mut command_rx: Receiver<Command>, command_tx : Sender<Command>
     let gui_config = Config::current();
     let gui_builder = Builder::new().name("GUI".into());
     gui_builder.spawn(move || {
-        Config::make_existing_current(gui_config);
         let stdout = stdout();
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).unwrap();

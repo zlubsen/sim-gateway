@@ -24,6 +24,7 @@ version = "0.1"
 name = "first"
 in_point = { uri = "udp://192.168.8.158:3001" }
 out_point = { uri = "udp://192.168.8.255:3000", kind = "Broadcast" }
+#out_point = { uri = "udp://192.168.8.255:3000" }
 buffer_size = 32768
 flow_mode = "bidirectional"
 enabled = true

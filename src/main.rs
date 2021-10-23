@@ -23,9 +23,8 @@ use std::io::{Error, ErrorKind, Read};
 use std::thread::{Builder as thrBuilder};
 use std::fs::File;
 use std::convert::TryFrom;
-use std::sync::{Arc, RwLock};
 
-use crate::gui::{start_gui, Settings};
+use crate::gui::{start_gui};
 use crate::runtime::{start_runtime_task};
 use crate::events::Command;
 use crate::model::arguments::*;
@@ -57,11 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_matches();
 
     get_config(&arg_matches)?.make_new_current();
-    trace!("config in main thread:\n{:?}", Config::current());
     let mode = Config::current().mode;
 
     let (command_tx, command_rx) = channel(10);
-    let (data_tx, data_rx) = channel(100);
+    let (data_tx, mut data_rx) = channel(100);
 
     let input_thread = {
         if Mode::Interactive == mode {
@@ -76,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         input_builder.spawn(move || {
             let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
-            trace!("config in input thread:\n{:?}", Config::current());
+
             loop {
                 // poll for user inputs
                 if event::poll(poll_rate).expect("Key event polling error") {
@@ -133,6 +131,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // loop {
+    //     if let Ok(event) = data_rx.try_recv() {
+    //         trace!("received data event: {:?}", event);
+    //     }
+    // }
+
     if _runtime_thread.is_ok() {
         _runtime_thread.unwrap().join().expect("Could not join on the associated thread, Runtime");
     }
@@ -156,11 +160,9 @@ fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::E
         let mut buffer = String::new();
         file.read_to_string(&mut buffer)?;
         // TODO return / exit with clean error message
-        let arguments : Arguments = toml::from_str(buffer.as_str())?;
-        trace!("Args:\n{:?}", arguments);
 
+        let arguments : Arguments = toml::from_str(buffer.as_str())?;
         let config = Config::try_from(&arguments)?;
-        trace!("Config:\n{:?}", config);
 
         Some(config)
     } else { None };
@@ -173,7 +175,6 @@ fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::E
     } else { None };
 
     let config = merge_configs(config_from_args, config_from_cli);
-    trace!("Merged config:\n{:?}", config);
 
     Ok(config)
 }

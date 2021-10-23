@@ -8,7 +8,7 @@ use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::error::Error;
 
-use log::{error, warn, info, debug, trace};
+use log::{error};
 
 use lazy_static::lazy_static;
 

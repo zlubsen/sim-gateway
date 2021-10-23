@@ -80,6 +80,6 @@ pub fn parse_command(input : &str) -> Command {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    StatBytesReceived(usize, i32), // route ID and #bytes
-    StatBytesSend(usize, i32), // route ID and #bytes
+    StatBytesReceived(usize, usize), // route ID and #bytes
+    StatBytesSend(usize, usize), // route ID and #bytes
 }

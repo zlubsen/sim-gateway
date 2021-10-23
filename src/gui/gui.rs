@@ -35,17 +35,13 @@ struct App {
     command_tx : Sender<Command>,
 }
 
-enum State {
-}
+// enum State {
+// }
 
 enum Area {
     RouteList,
     RouteDetails,
     Prompt,
-}
-
-pub struct Settings {
-    pub(crate) routes: Vec<i32>,
 }
 
 impl App {

@@ -1,6 +1,6 @@
-use std::net::{SocketAddr, Ipv4Addr, SocketAddrV4, IpAddr};
+use std::net::{SocketAddr, Ipv4Addr, SocketAddrV4};
 
-use log::{debug, error, info, trace};
+use log::{debug, error, trace};
 use tokio::io::ErrorKind;
 use tokio::net::{UdpSocket, ToSocketAddrs};
 use tokio::sync::broadcast::{Receiver, Sender};
@@ -44,8 +44,9 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
     // });
     Config::current().routes.iter().for_each(|route| {
         let r = route.clone();
+        let r_data_tx = data_tx.clone();
         tokio::spawn( async move {
-            start_route(r).await;
+            start_route(r, r_data_tx).await;
         });
     });
 
@@ -63,46 +64,59 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
     }
 }
 
-async fn start_route(route : Route) {
-    debug!("spawning route {}", route.name);
+async fn start_route(route : Route, route_data_tx : Sender<Event>) {
+    debug!("Spawning route '{}'", route.name);
     // create separate endpoints, preferable generic
     // receive from the in_point, or both if bidirectional
     // allow for transformations after receiving
     // write to the out_point, or both if bidirectional
 
     match (&route.in_point.scheme, &route.out_point.scheme) {
-        (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(&route).await; }
+        (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(&route, route_data_tx).await; }
         (Scheme::UDP, Scheme::TCP) => { create_route_udp_tcp(&route).await; }
         (Scheme::TCP, Scheme::TCP) => { create_route_tcp_tcp(&route).await; }
         (Scheme::TCP, Scheme::UDP) => { create_route_tcp_udp(&route).await; }
     };
 }
 
-async fn create_route_udp_udp(route : &Route) {
-    debug!("Creating udp-udp route {}", route.name);
+async fn create_route_udp_udp(route : &Route, route_data_tx : Sender<Event>) {
+    debug!("Creating udp-udp route '{}'", route.name);
 
     let in_socket = create_udp_socket(&route.in_point).await;
     let out_socket = create_udp_socket(&route.out_point).await;
+    let out_address = format!("{}:{}",
+                              route.out_point.socket.ip(),
+                              route.out_point.socket.port());
 
-    // TODO use Bytes crate
     let mut buf = BytesMut::with_capacity(route.buffer_size);
+    buf.resize(route.buffer_size, 0);
 
     loop {
-        let (len, addr) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
+        let (bytes_received, addr) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
+        // collect statistics for rx
+        if let Err(msg) = route_data_tx.send(Event::StatBytesReceived(0, bytes_received)) {
+            trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+        } else {
+            trace!("StatBytesReceived send through channel");
+        }
 
-        debug!("Received {} bytes from {}.", len, addr);
+        trace!("Received {} bytes from {}.", bytes_received, addr);
 
-        // match out_socket.send_to(&buf[..len],).await {
-        match out_socket.send(&buf[..len]).await {
-            Ok(_num_bytes) => {
-                debug!("Successfully send {:?} bytes to {:?} through route {}", _num_bytes, out_socket.local_addr(), route.name);
-                break;
+        match out_socket.send_to(&buf[..bytes_received],
+                                 out_address.as_str()).await {
+            Ok(bytes_send) => {
+                trace!("Successfully send {:?} bytes to {:?} through route '{}'", bytes_send, "192.168.8.158", route.name);
+                // collect statistics for tx
+                if let Err(msg) = route_data_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                    trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+                } else {
+                    trace!("StatBytesSend send through channel");
+                }
             }
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 continue;
             }
             Err(err) => {
-                // return Err(e);
                 error!("{}", err);
                 break;
             }
@@ -127,10 +141,8 @@ async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
     let local_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.socket.port());
     let socket = UdpSocket::bind(local_addr).await
         .expect(format!("Error binding Endpoint to local port {}.", local_addr).as_str());
-    let remote_addr = SocketAddrV4::new(endpoint.socket.ip().clone(), endpoint.socket.port());
-    socket.connect(remote_addr).await
-        .expect(format!("Error connection Endpoint to remote ip {:?}.", remote_addr).as_str());
-debug!("UDP socket created: {:?}", socket);
+    trace!("UDP socket created: {:?}", socket);
+
     // set type options
     match endpoint.socket_type {
         SocketType::UdpSocketType(UdpSocketType::Unicast) => {

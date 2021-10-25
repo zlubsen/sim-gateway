@@ -1,19 +1,24 @@
+use std::borrow::BorrowMut;
 use std::net::{SocketAddr, Ipv4Addr, SocketAddrV4};
 
 use log::{debug, error, trace};
-use tokio::io::ErrorKind;
-use tokio::net::{UdpSocket, ToSocketAddrs};
-use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::io::{AsyncWriteExt, ErrorKind};
+use tokio::net::{UdpSocket, TcpListener};
+use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::time::Duration;
 
 use crate::events::{Command, Event};
 use crate::model::config::*;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use crate::runtime::RuntimeError::{SendError, ReceiveError};
 use std::fmt::{Display, Formatter};
 use std::fmt;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Semaphore;
 
+const COMMAND_POLL_FREQ_MS : u64 = 200;
 pub const DEFAULT_ROUTE_BUFFER_SIZE : usize = 1024;
+const MAX_TCP_CONNECTIONS : usize = 10;
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -51,9 +56,9 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
     });
 
     loop {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let recv = command_rx.try_recv();
-        if let Ok(command) = recv {
+        tokio::time::sleep(Duration::from_millis(COMMAND_POLL_FREQ_MS)).await;
+        let received_command = command_rx.try_recv();
+        if let Ok(command) = received_command {
             match command {
                 Command::Quit => {
                     break;
@@ -71,11 +76,12 @@ async fn start_route(route : Route, route_data_tx : Sender<Event>) {
     // allow for transformations after receiving
     // write to the out_point, or both if bidirectional
 
-    match (&route.in_point.scheme, &route.out_point.scheme) {
-        (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(&route, route_data_tx).await; }
-        (Scheme::UDP, Scheme::TCP) => { create_route_udp_tcp(&route).await; }
-        (Scheme::TCP, Scheme::TCP) => { create_route_tcp_tcp(&route).await; }
-        (Scheme::TCP, Scheme::UDP) => { create_route_tcp_udp(&route).await; }
+    match (&route.in_point.scheme, &route.out_point.scheme, &route.enabled) {
+        (Scheme::UDP, Scheme::UDP, true) => { create_route_udp_udp(&route, route_data_tx.clone()).await; }
+        (Scheme::UDP, Scheme::TCP, true) => { create_route_udp_tcp(&route, route_data_tx.clone()).await; }
+        (Scheme::TCP, Scheme::TCP, true) => { create_route_tcp_tcp(&route).await; }
+        (Scheme::TCP, Scheme::UDP, true) => { create_route_tcp_udp(&route).await; }
+        _ => {}
     };
 }
 
@@ -124,8 +130,56 @@ async fn create_route_udp_udp(route : &Route, route_data_tx : Sender<Event>) {
     };
 }
 
-async fn create_route_udp_tcp(route : &Route) {
+/// A route that connects a UDP socket to a TCP Server socket.
+/// Bytes received via the UDP socket are forwarded to connections attached to the TCP socket.
+async fn create_route_udp_tcp(route : &Route, route_data_tx : Sender<Event>) {
+    debug!("Creating udp-tcp route '{}'", route.name);
 
+    let in_socket = create_udp_socket(&route.in_point).await;
+    let out_socket = create_tcp_server_socket(&route.out_point).await;
+    // let out_sem = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
+
+    let mut buf = BytesMut::with_capacity(route.buffer_size);
+    buf.resize(route.buffer_size, 0);
+
+    // let (out_sender, out_receiver) : (Sender<(&BytesMut, usize)>, Receiver<(&BytesMut, usize)>) = channel(10);
+
+    let route_name = route.name.clone();
+
+    // accept loop for incoming TCP connections
+    let (mut stream, _) = out_socket.accept().await.expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
+
+    // tokio::spawn(async move {
+    //     trace!("Waiting for incoming TCP connections on {:?}", out_socket.local_addr());
+    //     let sem_clone = out_sem.clone();
+    //     loop {
+    //         let (mut stream, _) = out_socket.accept().await
+    //             .expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
+    //         if let Ok(_guard) = sem_clone.try_acquire() {
+    //             trace!("Got an incoming TCP connection from {:?}", stream.peer_addr());
+    //             let mut out_receiver_subscription = out_sender_accept.subscribe();
+    //             tokio::spawn(async move {
+    //                 trace!("setting up send loop for client {:?}", stream.peer_addr());
+    //                 loop {
+    //                     let (buf, num_bytes) = out_receiver_subscription.recv().await.unwrap();
+    //                     stream.write(&buf[..num_bytes]).await;
+    //                 }
+    //             });
+    //         } else { trace!("Rejecting connection: too many open sockets on {:?}", out_socket.local_addr()); }
+    //     }
+    // });
+
+    loop {
+        let (bytes_received, addr) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
+        // collect statistics for rx
+        if let Err(msg) = route_data_tx.send(Event::StatBytesReceived(0, bytes_received)) {
+            trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+        } else {
+            trace!("StatBytesReceived send through channel");
+        }
+        let bytes_send = stream.write(&buf[..bytes_received]).await.expect(format!("Error sending through TCP socket for route '{}'", route.name).as_str());
+        // out_sender.send((&buf, bytes_received));
+    }
 }
 
 async fn create_route_tcp_tcp(route : &Route) {
@@ -139,7 +193,8 @@ async fn create_route_tcp_udp(route : &Route) {
 async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
     // bind to incoming port >> 0.0.0.0:port
     let local_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.socket.port());
-    let socket = UdpSocket::bind(local_addr).await
+    let socket = UdpSocket::bind(local_addr)
+        .await
         .expect(format!("Error binding Endpoint to local port {}.", local_addr).as_str());
     trace!("UDP socket created: {:?}", socket);
 
@@ -164,6 +219,16 @@ async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
         _ => {}
     };
     socket
+}
+
+async fn create_tcp_server_socket(endpoint : &EndPoint) -> TcpListener {
+    let listener_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.socket.port());
+    let listener = TcpListener::bind(listener_addr)
+        .await
+        .expect(format!("Error binding TCP listener socket for {:?}", listener_addr).as_str());
+    trace!("TCP listener socket created: {:?}", listener);
+
+    listener
 }
 
 // trait ReceiverEndPoint {

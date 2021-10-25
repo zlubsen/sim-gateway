@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = Config::current().mode;
 
     let (command_tx, command_rx) = channel(10);
-    let (data_tx, mut data_rx) = channel(100);
+    let (data_tx, data_rx) = channel(100);
 
     let input_thread = {
         if Mode::Interactive == mode {

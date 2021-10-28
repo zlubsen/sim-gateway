@@ -12,7 +12,7 @@ use clap::{Arg, App, ArgMatches};
 use toml;
 
 use tokio::runtime::{Builder as rtBuilder};
-use tokio::sync::broadcast::channel;
+use tokio::sync::broadcast::{channel, Sender};
 
 use crossterm::{
     event::{self, Event as CEvent},
@@ -20,7 +20,7 @@ use crossterm::{
 };
 
 use std::io::{Error, ErrorKind, Read};
-use std::thread::{Builder as thrBuilder};
+use std::thread::{Builder as thrBuilder, JoinHandle};
 use std::fs::File;
 use std::convert::TryFrom;
 
@@ -31,14 +31,72 @@ use crate::model::arguments::*;
 use crate::model::config::*;
 
 const INPUT_POLL_RATE : u64 = 100;
+const COMMAND_CHANNEL_CAPACITY : usize = 10;
+const DATA_CHANNEL_CAPACITY : usize = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    init_logger();
 
+    let arg_matches = get_cli_arguments();
+
+    get_config(&arg_matches)?.make_new_current();
+    let mode = Config::current().mode;
+
+    // TODO make channel capacities a setting
+    let (command_tx, command_rx) = channel(COMMAND_CHANNEL_CAPACITY);
+    let (data_tx, _data_rx) = channel(DATA_CHANNEL_CAPACITY);
+
+    let input_thread = start_input_thread(&mode, command_tx.clone());
+
+    let command_rx_gui = command_tx.subscribe();
+    let command_tx_gui = command_tx.clone();
+    let data_rx_gui = data_tx.subscribe();
+    let gui_thread = match mode {
+        Mode::Interactive => {
+            start_gui(
+                command_rx_gui,
+                command_tx_gui,
+                data_rx_gui)
+        }
+        Mode::Headless => Err(Error::new(ErrorKind::Other, "GUI not available in Headless mode"))
+    };
+
+    // tokio runtime runs in the main thread
+    let runtime = rtBuilder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .build().unwrap();
+    let _guard = runtime.enter();
+    runtime.block_on( async {start_runtime_task(command_rx, data_tx).await});
+    runtime.shutdown_background();
+
+    // loop {
+    //     if let Ok(event) = data_rx.try_recv() {
+    //         trace!("received data event: {:?}", event);
+    //     }
+    // }
+
+    if Mode::Interactive == mode {
+        if let Ok(gui_handle) = gui_thread {
+            gui_handle.join().expect("Could not join on the associated thread: GUI");
+        }
+    }
+    if let Ok(input_handle) = input_thread {
+        input_handle.join().expect("Could not join on the associated thread: Input");
+    }
+
+    Ok(())
+}
+
+fn init_logger() {
+    env_logger::init();
+}
+
+fn get_cli_arguments() -> ArgMatches<'static> {
     // Read config: we expect a .toml file with the config (required for now).
     // TODO Or perhaps later most settings as separate arguments.
-    // TODO -v verbosity level
-    let arg_matches = App::new("sim-gateway")
+    // TODO -v verbosity level for logger
+    App::new("sim-gateway")
         .version("0.1.0")
         .author("Zeeger Lubsen <zeeger@lubsen.eu>")
         .about("Gateway component for routing, filtering and transforming simulation protocols")
@@ -53,103 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .short("i")
             .long("interactive")
             .help("Enable interactive CLI mode"))
-        .get_matches();
-
-    get_config(&arg_matches)?.make_new_current();
-    let mode = Config::current().mode;
-
-    let (command_tx, command_rx) = channel(10);
-    let (data_tx, data_rx) = channel(100);
-
-    let input_thread = {
-        if Mode::Interactive == mode {
-            enable_raw_mode().expect("Failed to set raw mode");
-        }
-        let input_builder = thrBuilder::new().name("Input".into());
-
-        // let command_tx_input = command_tx.clone();
-        // let command_rx_input = command_rx.clone();
-        let command_tx_input = command_tx.clone();
-        let mut command_rx_input = command_tx_input.subscribe();
-
-        input_builder.spawn(move || {
-            let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
-
-            loop {
-                // poll for user inputs
-                if event::poll(poll_rate).expect("Key event polling error") {
-                    if let CEvent::Key(key) = event::read().expect("Key event read error") {
-                        trace!("user key event: {:?}", key);
-                        let command = Command::from(key);
-                        trace!("command to send: {:?}", command);
-                        command_tx_input.send(command).expect("Send key event error");
-                    }
-                }
-                // handle incoming commands
-                if let Ok(command) = command_rx_input.try_recv() {
-                    trace!("input recv command: {:?}", command);
-                    match command {
-                        Command::Quit => break,
-                        Command::Key('q') => {
-                            if Config::current().mode == Mode::Headless {
-                                let _result = command_tx_input.send(Command::Quit);
-                            }
-                        },
-                        _ => {}
-                    }
-                }
-            }
-        })
-    };
-
-    // let command_rx_gui = command_rx.clone();
-    // let data_rx_gui = data_rx.clone();
-    let command_rx_gui = command_tx.subscribe();
-    let command_tx_gui = command_tx.clone();
-    let data_rx_gui = data_tx.subscribe();
-    let gui_thread = match mode {
-        Mode::Interactive => {
-            start_gui(
-                command_rx_gui,
-                command_tx_gui,
-                data_rx_gui)
-        }
-        Mode::Headless => Err(Error::new(ErrorKind::Other, "GUI not available in Headless mode"))
-    };
-
-    let _runtime_thread = {
-        let runtime = rtBuilder::new_multi_thread()
-            .enable_io()
-            .enable_time()
-            .build().unwrap();
-        let _guard = runtime.enter();
-
-        let rt_builder = thrBuilder::new().name("Runtime".into());
-        rt_builder.spawn(move || {
-            runtime.block_on( async {start_runtime_task(command_rx, data_tx).await});
-            runtime.shutdown_background();
-        })
-    };
-
-    // loop {
-    //     if let Ok(event) = data_rx.try_recv() {
-    //         trace!("received data event: {:?}", event);
-    //     }
-    // }
-
-    if _runtime_thread.is_ok() {
-        _runtime_thread.unwrap().join().expect("Could not join on the associated thread, Runtime");
-    }
-    if Mode::Interactive == mode {
-        if let Ok(gui) = gui_thread {
-            gui.join().expect("Could not join on the associated thread, GUI");
-        }
-    }
-    if let Ok(input) = input_thread {
-        input.join().expect("Could not join on the associated thread, Input");
-    }
-
-    Ok(())
+        .get_matches()
 }
 
 // TODO possibly convert to config_rs crate
@@ -179,44 +141,40 @@ fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::E
     Ok(config)
 }
 
-// fn start_input_thread(mode : &Mode) -> Result<JoinHandle<()>, std::io::Error> {
-//     if Mode::Interactive == mode {
-//         enable_raw_mode().expect("Failed to set raw mode");
-//     }
-//     let input_builder = thrBuilder::new().name("Input".into());
-//
-//     // let command_tx_input = command_tx.clone();
-//     // let command_rx_input = command_rx.clone();
-//     let command_tx_input = command_tx.clone();
-//     let mut command_rx_input = command_tx_input.subscribe();
-//     let config_for_input = Config::current().clone();
-//     input_builder.spawn(move || {
-//         let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
-//
-//         trace!("config in input thread:\n{:?}", Config::current());
-//         loop {
-//             // poll for user inputs
-//             if event::poll(poll_rate).expect("Key event polling error") {
-//                 if let CEvent::Key(key) = event::read().expect("Key event read error") {
-//                     trace!("user key event: {:?}", key);
-//                     let command = Command::from(key);
-//                     trace!("command to send: {:?}", command);
-//                     command_tx_input.send(command).expect("Send key event error");
-//                 }
-//             }
-//             // handle incoming commands
-//             if let Ok(command) = command_rx_input.try_recv() {
-//                 trace!("input recv command: {:?}", command);
-//                 match command {
-//                     Command::Quit => break,
-//                     Command::Key('q') => {
-//                         if mode == Mode::Headless {
-//                             let _result = command_tx_input.send(Command::Quit);
-//                         }
-//                     },
-//                     _ => {}
-//                 }
-//             }
-//         }
-//     })
-// }
+fn start_input_thread(mode : &Mode, command_tx_input : Sender<Command>) -> Result<JoinHandle<()>, std::io::Error> {
+    if Mode::Interactive == *mode {
+        enable_raw_mode().expect("Failed to set raw mode");
+    }
+    let input_builder = thrBuilder::new().name("Input".into());
+
+    let mut command_rx_input = command_tx_input.subscribe();
+
+    input_builder.spawn(move || {
+        let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
+
+        loop {
+            // poll for user inputs
+            if event::poll(poll_rate).expect("Key event polling error") {
+                if let CEvent::Key(key) = event::read().expect("Key event read error") {
+                    trace!("user key event: {:?}", key);
+                    let command = Command::from(key);
+                    trace!("command to send: {:?}", command);
+                    command_tx_input.send(command).expect("Send key event error");
+                }
+            }
+            // handle incoming commands
+            if let Ok(command) = command_rx_input.try_recv() {
+                trace!("input recv command: {:?}", command);
+                match command {
+                    Command::Quit => break,
+                    Command::Key('q') => {
+                        if Config::current().mode == Mode::Headless {
+                            let _result = command_tx_input.send(Command::Quit);
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+    })
+}

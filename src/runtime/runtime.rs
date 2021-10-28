@@ -14,11 +14,12 @@ use crate::runtime::RuntimeError::{SendError, ReceiveError};
 use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::sync::{Arc, RwLock};
+use std::task::Poll;
 use tokio::sync::Semaphore;
 
 const COMMAND_POLL_FREQ_MS : u64 = 200;
 pub const DEFAULT_ROUTE_BUFFER_SIZE : usize = 1024;
-const MAX_TCP_CONNECTIONS : usize = 10;
+const MAX_TCP_CONNECTIONS : usize = 5;
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -40,13 +41,7 @@ impl Display for RuntimeError {
 
 
 pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Sender<Event>) {
-    // spawn gateway main task
-
-    // let _main_task = tokio::spawn( async move {
-    //     trace!("tokio.spawn");
-    //     start_routes(data_tx).await;
-    //     // trace!("finished start_routes");
-    // });
+    // spawn routes
     Config::current().routes.iter().for_each(|route| {
         let r = route.clone();
         let r_data_tx = data_tx.clone();
@@ -55,6 +50,7 @@ pub async fn start_runtime_task(mut command_rx: Receiver<Command>, data_tx: Send
         });
     });
 
+    // wait for runtime commands / shutdown.
     loop {
         tokio::time::sleep(Duration::from_millis(COMMAND_POLL_FREQ_MS)).await;
         let received_command = command_rx.try_recv();
@@ -137,57 +133,60 @@ async fn create_route_udp_tcp(route : &Route, route_data_tx : Sender<Event>) {
 
     let in_socket = create_udp_socket(&route.in_point).await;
     let out_socket = create_tcp_server_socket(&route.out_point).await;
-    // let out_sem = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
+    let out_sem = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
+    let out_sem_accept = out_sem.clone();
 
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
 
-    // let (out_sender, out_receiver) : (Sender<(&BytesMut, usize)>, Receiver<(&BytesMut, usize)>) = channel(10);
+    let (out_sender, _out_receiver) : (Sender<Bytes>, Receiver<Bytes>) = channel(10); // TODO make capacity a setting
+    let out_sender_accept = out_sender.clone();
 
     let route_name = route.name.clone();
 
     // accept loop for incoming TCP connections
-    let (mut stream, _) = out_socket.accept().await.expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
+    // let (mut stream, _) = out_socket.accept().await.expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
+    tokio::spawn(async move {
+        trace!("Waiting for incoming TCP connections on {:?}", out_socket.local_addr());
 
-    // tokio::spawn(async move {
-    //     trace!("Waiting for incoming TCP connections on {:?}", out_socket.local_addr());
-    //     let sem_clone = out_sem.clone();
-    //     loop {
-    //         let (mut stream, _) = out_socket.accept().await
-    //             .expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
-    //         if let Ok(_guard) = sem_clone.try_acquire() {
-    //             trace!("Got an incoming TCP connection from {:?}", stream.peer_addr());
-    //             let mut out_receiver_subscription = out_sender_accept.subscribe();
-    //             tokio::spawn(async move {
-    //                 trace!("setting up send loop for client {:?}", stream.peer_addr());
-    //                 loop {
-    //                     let (buf, num_bytes) = out_receiver_subscription.recv().await.unwrap();
-    //                     stream.write(&buf[..num_bytes]).await;
-    //                 }
-    //             });
-    //         } else { trace!("Rejecting connection: too many open sockets on {:?}", out_socket.local_addr()); }
-    //     }
-    // });
+        loop {
+            let (mut stream, _addr) = out_socket.accept().await
+                .expect(format!("Error establishing incoming TCP connection for route '{}'.", route_name).as_str());
+            if let Ok(_guard) = out_sem_accept.try_acquire() {
+                let mut out_receiver_subscription = out_sender_accept.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        // TODO how does this handle late joiners? - seems OK: late joiners only get future messages
+                        let out_buf = out_receiver_subscription.recv().await.unwrap();
+                        // FIXME can panic when socket becomes disconnected, use try_write instead.
+                        stream.write(&out_buf[..])
+                            .await
+                            .expect(format!("Error sending data through TCP socket '{:?}'", stream).as_str());
+                    }
+                });
+            } else { trace!("Rejecting connection: too many open sockets on {:?}", out_socket.local_addr()); }
+        }
+    });
 
     loop {
-        let (bytes_received, addr) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
+        let (bytes_received, _addr) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
         // collect statistics for rx
         if let Err(msg) = route_data_tx.send(Event::StatBytesReceived(0, bytes_received)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         } else {
             trace!("StatBytesReceived send through channel");
         }
-        let bytes_send = stream.write(&buf[..bytes_received]).await.expect(format!("Error sending through TCP socket for route '{}'", route.name).as_str());
-        // out_sender.send((&buf, bytes_received));
+        let send_buf = buf.clone().freeze();
+        out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
     }
 }
 
 async fn create_route_tcp_tcp(route : &Route) {
-
+    unimplemented!("TCP to TCP not yet implemented");
 }
 
 async fn create_route_tcp_udp(route : &Route) {
-
+    unimplemented!("TCP to UDP not yet implemented");
 }
 
 async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {

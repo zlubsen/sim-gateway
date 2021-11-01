@@ -1,5 +1,5 @@
 use strum::{EnumString, IntoStaticStr};
-use std::net::{SocketAddrV4};
+use std::net::{IpAddr, SocketAddrV4};
 use std::sync::{Arc, RwLock};
 use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use std::str::FromStr;
@@ -11,6 +11,7 @@ use std::error::Error;
 use log::{error};
 
 use lazy_static::lazy_static;
+use crate::runtime::{Filter, Transformer};
 
 lazy_static! {
     static ref CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
@@ -102,18 +103,24 @@ pub struct Route {
     pub in_point : EndPoint,
     pub out_point : EndPoint,
     pub buffer_size : usize,
+    pub max_connections: usize,
     pub flow_mode : FlowMode,
+    pub block_host : bool,
     pub enabled : bool,
+    // pub filters : Vec<dyn Filter>,
+    // pub transformers : Vec<dyn Transformer>,
 }
 
 impl Route {
-    pub fn new(name : String, in_point : EndPoint, out_point : EndPoint, buffer_size : usize, flow_mode : FlowMode, enabled : bool) -> Route {
+    pub fn new(name : String, in_point : EndPoint, out_point : EndPoint, buffer_size : usize, max_connections : usize, flow_mode : FlowMode, block_host : bool, enabled : bool) -> Route {
         return Route {
             name,
             in_point,
             out_point,
             buffer_size,
+            max_connections,
             flow_mode,
+            block_host,
             enabled,
         }
     }
@@ -132,7 +139,8 @@ impl TryFrom<&RouteSpec> for Route {
         // let out_point = if let Some(cast_type) = &spec.out_point_cast_type {
         //     out_point.add_cast_type(cast_type)?
         // } else { out_point };
-        let buffer_size = spec.buffer_size.unwrap_or(32768) as usize;
+        let buffer_size = spec.buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE_BYTES);
+        let max_connections = spec.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
 
         let flow_mode = if let Some(val) = &spec.flow_mode {
             match FlowMode::from_str(val.as_str()) {
@@ -140,29 +148,35 @@ impl TryFrom<&RouteSpec> for Route {
                 Err(err) => { return Err(ConfigError::RouteError(format!("{} - {}", name, err))); }
             }
         } else { FlowMode::default() };
-        let enabled = if let Some(value) = spec.enabled {
-            value
-        } else { true };
+        let block_host = spec.block_host.unwrap_or(DEFAULT_BLOCK_HOST);
+        let enabled = spec.enabled.unwrap_or(DEFAULT_ENABLED);
 
         Ok(Route{
             name,
             in_point,
             out_point,
             buffer_size,
+            max_connections,
             flow_mode,
+            block_host,
             enabled
         })
     }
 }
 
+const DEFAULT_BUFFER_SIZE_BYTES: usize = 32768;
+const DEFAULT_MAX_CONNECTIONS : usize = 10;
 const DEFAULT_TTL : u32 = 64; // default for unix and mac
+const DEFAULT_BLOCK_HOST : bool = true;
+const DEFAULT_ENABLED : bool = true;
 
 #[derive(Clone, Debug)]
 pub struct EndPoint {
     pub socket : SocketAddrV4,
-    pub scheme: Scheme,
-    pub socket_type: SocketType,
-    pub ttl: u32,
+    pub scheme : Scheme,
+    pub socket_type : SocketType,
+    pub ttl : u32,
+    pub interface : IpAddr,
 }
 
 impl TryFrom<&EndPointSpec> for EndPoint {
@@ -199,15 +213,15 @@ impl TryFrom<&EndPointSpec> for EndPoint {
                 } else { SocketType::TcpSocketType(TcpSocketType::default()) }
             }
         };
-        let ttl = if let Some(ttl_val) = spec.ttl {
-            ttl_val
-        } else { DEFAULT_TTL };
+        let ttl = spec.ttl.unwrap_or(DEFAULT_TTL);
+        let interface = spec.interface.parse().expect("Invalid interface provided in config file.");
 
         Ok(EndPoint {
             socket: socket_address,
             scheme,
             socket_type,
             ttl,
+            interface,
         })
     }
 }
@@ -257,7 +271,7 @@ impl Default for TcpSocketType {
     }
 }
 
-#[derive(Copy, Clone, Debug, EnumString)]
+#[derive(Copy, Clone, Debug, EnumString, PartialEq)]
 pub enum FlowMode {
     #[strum(serialize = "unidirectional")]
     UniDirectional,

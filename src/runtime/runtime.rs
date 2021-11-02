@@ -11,8 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
 use tokio::sync::Semaphore;
-use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender};
+use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender, Sender};
 use tokio::sync::mpsc::{channel as mpsc_channel, Receiver as MpscReceiver, Sender as MpscSender};
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::events::{Command, Event};
@@ -239,8 +240,8 @@ async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
 
     let task_handle = {
         let out_address = format!("{}:{}",
-                                  route.in_point.socket.ip(),
-                                  route.in_point.socket.port());
+                                  route.out_point.socket.ip(),
+                                  route.out_point.socket.port());
         tokio::spawn(
             run_tcp_server_udp_route(route.clone(), from_tcp_receiver, out_socket.clone(), out_address, event_tx.clone())
         )
@@ -311,24 +312,45 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
             .expect(format!("Error establishing incoming TCP connection for route '{}'.", route.name).as_str());
         if let Ok(_guard) = sem.try_acquire() {
             let (reader, writer) = stream.into_split();
-            if let Some(ref to_tcp_sender) = to_tcp_sender_opt {
-                trace!("New TCP connection - writer");
-                tokio::spawn(
-                    run_tcp_server_writer(route.clone(),
-                                          writer,
-                                          to_tcp_sender.subscribe(),
-                                          event_tx.clone())
-                );
-            }
-            if let Some(ref from_tcp_receiver) = from_tcp_receiver_opt {
-                trace!("New TCP connection - reader");
-                tokio::spawn(
-                    run_tcp_server_reader(route.clone(),
-                                          reader,
-                                          from_tcp_receiver.clone(),
-                                          event_tx.clone())
-                );
-            }
+
+            // TODO clean up this part if we don't need the task handles
+            let (write_handle_opt, read_handle_opt) =
+            match (&to_tcp_sender_opt, &from_tcp_receiver_opt) {
+                (Some(ref to_tcp_sender), Some(ref from_tcp_receiver)) => {
+                    (Some(tokio::spawn(
+                        run_tcp_server_writer(route.clone(),
+                                              writer,
+                                              to_tcp_sender.subscribe(),
+                                              event_tx.clone())
+                    )),
+                     Some(tokio::spawn(
+                        run_tcp_server_reader(route.clone(),
+                                              reader,
+                                              None,
+                                              from_tcp_receiver.clone(),
+                                              event_tx.clone())
+                    )))
+                }
+                (Some(ref to_tcp_sender), None) => {
+                    (Some(tokio::spawn(
+                        run_tcp_server_writer(route.clone(),
+                                              writer,
+                                              to_tcp_sender.subscribe(),
+                                              event_tx.clone())
+                    )),None)
+                }
+                (None, Some(ref from_tcp_receiver)) => {
+                    (None,
+                     Some(tokio::spawn(
+                        run_tcp_server_reader(route.clone(),
+                                              reader,
+                                              Some(writer),
+                                              from_tcp_receiver.clone(),
+                                              event_tx.clone())
+                    )))
+                }
+                (None, None) => {break;}
+            };
         } else { trace!("Rejecting connection: too many open sockets on {:?}", socket.local_addr()); }
     }
 }
@@ -337,9 +359,9 @@ async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, m
     loop {
         // TODO how does this handle late joiners? - seems OK: late joiners only get future messages
         if let Ok(out_buf) = data_channel.recv().await {
-            // FIXME can panic when socket becomes disconnected, use try_write instead.
             trace!("Got via BcReceiver channel - will write via TCP: {:?}", &out_buf[..]);
             match writer.write(&out_buf[..]).await {
+                Ok(0) => { break; }
                 Ok(bytes_send) => {
                     if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
                         trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
@@ -349,19 +371,24 @@ async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, m
                 }
                 Err(err) => {
                     trace!("Error sending data through TCP socket '{:?}': {:?}", writer, err);
+                    break;
                 }
             }
         }
     }
 }
 
-async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, writer: Option<OwnedWriteHalf>, data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
     loop {
         trace!("Waiting for incoming TCP data");
         match reader.read(&mut buf).await {
-            Ok(0) => {  } // FIXME somehow the TCP socket as an in_point keeps receiving 0 bytes
+            Ok(0) => {
+                // reunite not really needed, but need to prevent the writer from being dropped
+                //  when the endpoint is unidirectional
+                if let Some(w) = writer { reader.reunite(w); }
+                break; } // Indicates the connection is closed.
             Ok(bytes_received) => {
                 trace!("received bytes via tcp: {} bytes - {:?}", bytes_received, &buf[..bytes_received]);
                 // TODO StatsBytesReceived
@@ -371,7 +398,10 @@ async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, da
                 data_channel.send(buf_to_send).await.expect("Error sending received data through mpsc channel.");
                 trace!("Did send {} bytes buf_to_send via MpscChannel", bytes_received);
             }
-            Err(err) => { trace!("Error while receiving data via tcp: {}", err); }
+            Err(err) => {
+                trace!("Error while receiving data via tcp: {}", err);
+                break;
+            }
         }
     }
 }

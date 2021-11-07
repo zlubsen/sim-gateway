@@ -3,7 +3,7 @@ pub mod gui;
 pub mod runtime;
 pub mod model;
 
-use log::{error, warn, info, debug, trace};
+use log::{info};
 use env_logger;
 
 extern crate clap;
@@ -25,14 +25,11 @@ use std::fs::File;
 use std::convert::TryFrom;
 
 use crate::gui::{start_gui};
-use crate::runtime::{start_runtime_task};
+use crate::runtime::{start_runtime};
 use crate::events::Command;
+use crate::model::constants::*;
 use crate::model::arguments::*;
 use crate::model::config::*;
-
-const INPUT_POLL_RATE : u64 = 100;
-const COMMAND_CHANNEL_CAPACITY : usize = 10;
-const DATA_CHANNEL_CAPACITY : usize = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger();
@@ -44,19 +41,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TODO make channel capacities a setting
     let (command_tx, command_rx) = channel(COMMAND_CHANNEL_CAPACITY);
-    let (data_tx, _data_rx) = channel(DATA_CHANNEL_CAPACITY);
+    let (event_tx, _event_rx) = channel(DATA_CHANNEL_CAPACITY);
 
     let input_thread = start_input_thread(&mode, command_tx.clone());
 
-    let command_rx_gui = command_tx.subscribe();
-    let command_tx_gui = command_tx.clone();
-    let data_rx_gui = data_tx.subscribe();
     let gui_thread = match mode {
         Mode::Interactive => {
+            // let command_rx_gui = ;
+            // let command_tx_gui = ;
+            // let data_rx_gui = ;
             start_gui(
-                command_rx_gui,
-                command_tx_gui,
-                data_rx_gui)
+                command_tx.subscribe(),
+                command_tx.clone(),
+                event_tx.subscribe())
         }
         Mode::Headless => Err(Error::new(ErrorKind::Other, "GUI not available in Headless mode"))
     };
@@ -67,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_time()
         .build().unwrap();
     let _guard = runtime.enter();
-    runtime.block_on( async {start_runtime_task(command_rx, data_tx).await});
+    runtime.block_on( async { start_runtime(command_rx, event_tx).await});
     runtime.shutdown_background();
 
     // loop {
@@ -150,21 +147,18 @@ fn start_input_thread(mode : &Mode, command_tx_input : Sender<Command>) -> Resul
     let mut command_rx_input = command_tx_input.subscribe();
 
     input_builder.spawn(move || {
-        let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE);
+        let poll_rate = std::time::Duration::from_millis(INPUT_POLL_RATE_MS);
 
         loop {
             // poll for user inputs
             if event::poll(poll_rate).expect("Key event polling error") {
                 if let CEvent::Key(key) = event::read().expect("Key event read error") {
-                    trace!("user key event: {:?}", key);
                     let command = Command::from(key);
-                    trace!("command to send: {:?}", command);
                     command_tx_input.send(command).expect("Send key event error");
                 }
             }
             // handle incoming commands
             if let Ok(command) = command_rx_input.try_recv() {
-                trace!("input recv command: {:?}", command);
                 match command {
                     Command::Quit => break,
                     Command::Key('q') => {

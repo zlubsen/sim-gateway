@@ -3,24 +3,25 @@ use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::sync::Arc;
 
-use log::{debug, error, trace};
+use log::{info, error, trace};
 
 use bytes::{Bytes, BytesMut};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
-use tokio::sync::Semaphore;
-use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender, Sender};
+use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender};
 use tokio::sync::mpsc::{channel as mpsc_channel, Receiver as MpscReceiver, Sender as MpscSender};
-use tokio::task::JoinHandle;
+// use tokio::sync::oneshot::{channel as os_channel, Receiver as OsReceiver, Sender as OsSender};
+use tokio::sync::Notify;
 use tokio::time::Duration;
 
 use crate::events::{Command, Event};
 use crate::model::config::*;
 use crate::model::config::FlowMode::BiDirectional;
+use crate::model::constants::*;
 
-const BROADCAST_TTL : u32 = 1; // only broadcast on the local subnet
 const COMMAND_POLL_FREQ_MS : u64 = 200;
 
 #[derive(Debug)]
@@ -42,15 +43,35 @@ impl Display for RuntimeError {
 }
 
 
-pub async fn start_runtime_task(mut command_rx: BcReceiver<Command>, event_tx: BcSender<Event>) {
+pub async fn start_runtime(mut command_rx: BcReceiver<Command>, event_tx: BcSender<Event>) {
     // spawn routes
-    Config::current().routes.iter().for_each(|route| {
+    Config::current().routes.iter().filter(|r|r.enabled).for_each(|route| {
         let r = Arc::new(route.clone());
         let event_channel = event_tx.clone();
         tokio::spawn( async move {
             start_route(r, event_channel).await;
         });
     });
+    // TODO collect the spawned task handles
+
+    // listen for events when running headless
+    if Config::current().mode == Mode::Headless {
+        let mut event_rx = event_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(event) = event_rx.recv().await {
+                    match event {
+                        Event::Message(msg) => { info!("{}", msg); }
+                        Event::Error(msg) => { error!("{}", msg); }
+                        _ => {}
+                        // Event::StatBytesReceived(_, _) => {}
+                        // Event::StatBytesSend(_, _) => {}
+                        // Event::ErrorTooManyConnections(_, _) => {}
+                    }
+                }
+            }
+        });
+    }
 
     // wait for runtime commands / shutdown.
     loop {
@@ -68,28 +89,21 @@ pub async fn start_runtime_task(mut command_rx: BcReceiver<Command>, event_tx: B
 }
 
 async fn start_route(route : Arc<Route>, event_tx: BcSender<Event>) {
-    // create separate endpoints, preferable generic
-    // receive from the in_point, or both if bidirectional
-    // allow for transformations after receiving
-    // write to the out_point, or both if bidirectional
-
-    match (&route.in_point.scheme, &route.out_point.scheme, &route.enabled) {
-        (Scheme::UDP, Scheme::UDP, true) => { create_route_udp_udp(route, event_tx.clone()).await; }
-        (Scheme::UDP, Scheme::TCP, true) => { create_route_udp_tcp(route, event_tx.clone()).await; }
-        (Scheme::TCP, Scheme::TCP, true) => { create_route_tcp_tcp(route, event_tx.clone()).await; }
-        (Scheme::TCP, Scheme::UDP, true) => { create_route_tcp_udp(route, event_tx.clone()).await; }
-        _ => {}
+    match (&route.in_point.scheme, &route.out_point.scheme) {
+        (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(route, event_tx.clone()).await; }
+        (Scheme::UDP, Scheme::TCP) => { create_route_udp_tcp(route, event_tx.clone()).await; }
+        (Scheme::TCP, Scheme::TCP) => { create_route_tcp_tcp(route, event_tx.clone()).await; }
+        (Scheme::TCP, Scheme::UDP) => { create_route_tcp_udp(route, event_tx.clone()).await; }
     };
 }
 
 async fn create_route_udp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    trace!("Creating route '{}'", route.name);
+    event_tx.send(Event::Message(format!("Creating udp-udp route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = Arc::new(create_udp_socket(&route.in_point).await);
     let out_socket = Arc::new(create_udp_socket(&route.out_point).await);
 
     let task_handle = {
-        trace!("Spawn udp-udp route {} in-out", route.name);
         let out_address = format!("{}:{}",
                                   route.out_point.socket.ip(),
                                   route.out_point.socket.port());
@@ -104,7 +118,6 @@ async fn create_route_udp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
     };
 
     let task_handle_reverse = if BiDirectional == route.flow_mode {
-        trace!("Spawn udp-udp route {} out-in", route.name);
         let in_address = format!("{}:{}",
                                   route.in_point.socket.ip(),
                                   route.in_point.socket.port());
@@ -118,7 +131,6 @@ async fn create_route_udp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
         ))
     } else { None };
 
-    // TODO use tokio::select! on all 2 handles?
     task_handle.await.expect(format!("Route {} task (udp-udp > in-out) panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task (udp-udp > out-in) panicked", route.name).as_str());
@@ -128,7 +140,7 @@ async fn create_route_udp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
 /// A route that connects a UDP socket to a TCP Server socket.
 /// Bytes received via the UDP socket are forwarded to connections attached to the TCP socket.
 async fn create_route_udp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    trace!("Creating udp-tcp route '{}'", route.name);
+    event_tx.send(Event::Message(format!("Creating udp-tcp route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = Arc::new(create_udp_socket(&route.in_point).await);
     let out_socket = create_tcp_server_socket(&route.out_point).await;
@@ -164,7 +176,6 @@ async fn create_route_udp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
         ))
     } else { None };
 
-    // TODO use tokio::select! on all 3 handles?
     task_handle.await.expect(format!("Route {} task (udp->tcp) panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task (udp<-tcp) panicked", route.name).as_str());
@@ -172,6 +183,8 @@ async fn create_route_udp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
 }
 
 async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp-tcp route '{}'", route.name))).unwrap_or_default();
+
     let in_socket = create_tcp_server_socket(&route.in_point).await;
     let out_socket = create_tcp_server_socket(&route.out_point).await;
 
@@ -207,7 +220,6 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
         ))
     } else { None };
 
-    // TODO use tokio::select! on all 4 handles?
     task_handle.await.expect(format!("Route {} task (tcp->tcp) panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task (tcp<-tcp) panicked", route.name).as_str());
@@ -215,7 +227,7 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
 }
 
 async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    trace!("Creating tcp-udp route '{}'", route.name);
+    event_tx.send(Event::Message(format!("Creating tcp-udp route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = create_tcp_server_socket(&route.in_point).await;
     let out_socket = Arc::new(create_udp_socket(&route.out_point).await);
@@ -253,7 +265,6 @@ async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
         ))
     } else { None };
 
-    // TODO use tokio::select! on all 3 handles?
     task_handle.await.expect(format!("Route {} task (udp->tcp) panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task (udp<-tcp) panicked", route.name).as_str());
@@ -267,7 +278,6 @@ async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
     let socket = UdpSocket::bind(local_addr)
         .await
         .expect(format!("Error binding Endpoint to local port {}.", local_addr).as_str());
-    trace!("UDP socket created: {:?} - local addr: {:?}", socket, socket.local_addr());
 
     // set type options
     match endpoint.socket_type {
@@ -297,111 +307,144 @@ async fn create_tcp_server_socket(endpoint : &EndPoint) -> TcpListener {
     let listener = TcpListener::bind(listener_addr)
         .await
         .expect(format!("Error binding TCP listener socket for {:?}", listener_addr).as_str());
-    trace!("TCP listener socket created: {:?}", listener);
 
     listener
 }
 
 async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_sender_opt: Option<BcSender<Bytes>>, from_tcp_receiver_opt: Option<MpscSender<Bytes>>, event_tx: BcSender<Event>) {
-    trace!("Waiting for incoming TCP connections on {:?}", socket.local_addr());
-
     let sem = Arc::new(Semaphore::new(route.max_connections));
 
     loop {
-        let (stream, _addr) = socket.accept().await
-            .expect(format!("Error establishing incoming TCP connection for route '{}'.", route.name).as_str());
-        if let Ok(_guard) = sem.try_acquire() {
+        // Permits should be dropped after a spawned socket task has finished.
+        if let Ok(permit) = sem.clone().acquire_owned().await {
+            let (stream, _addr) = socket.accept().await
+                .expect(format!("Error establishing incoming TCP connection for route '{}'.", route.name).as_str());
             let (reader, writer) = stream.into_split();
+            let notifier = Arc::new(Notify::new());
 
-            // TODO clean up this part if we don't need the task handles
-            let (write_handle_opt, read_handle_opt) =
+            let (write_handle, read_handle) =
             match (&to_tcp_sender_opt, &from_tcp_receiver_opt) {
                 (Some(ref to_tcp_sender), Some(ref from_tcp_receiver)) => {
-                    (Some(tokio::spawn(
+
+                    (tokio::spawn(
                         run_tcp_server_writer(route.clone(),
-                                              writer,
+                                              writer, notifier.clone(),
                                               to_tcp_sender.subscribe(),
                                               event_tx.clone())
-                    )),
-                     Some(tokio::spawn(
+                    ),
+                     tokio::spawn(
                         run_tcp_server_reader(route.clone(),
-                                              reader,
-                                              None,
+                                              reader, notifier.clone(),
                                               from_tcp_receiver.clone(),
                                               event_tx.clone())
-                    )))
+                    ))
                 }
                 (Some(ref to_tcp_sender), None) => {
-                    (Some(tokio::spawn(
+                    (tokio::spawn(
                         run_tcp_server_writer(route.clone(),
-                                              writer,
+                                              writer, notifier.clone(),
                                               to_tcp_sender.subscribe(),
                                               event_tx.clone())
-                    )),None)
+                    ),tokio::spawn(
+                        run_tcp_reader_dummy(reader, notifier.clone())
+                    ))
                 }
                 (None, Some(ref from_tcp_receiver)) => {
-                    (None,
-                     Some(tokio::spawn(
+                    (tokio::spawn(
+                        run_tcp_writer_dummy(writer, notifier.clone())
+                    ),
+                     tokio::spawn(
                         run_tcp_server_reader(route.clone(),
-                                              reader,
-                                              Some(writer),
+                                              reader, notifier.clone(),
                                               from_tcp_receiver.clone(),
                                               event_tx.clone())
-                    )))
+                    ))
                 }
                 (None, None) => {break;}
             };
-        } else { trace!("Rejecting connection: too many open sockets on {:?}", socket.local_addr()); }
+            tokio::spawn(async move {
+                read_handle.await.unwrap();
+                write_handle.await.unwrap();
+                drop(permit);
+            });
+        } else {
+            event_tx.send(
+                Event::Error(format!("Too many connection on TCP socket {} for route '{}'", socket.local_addr().unwrap(), route.name)))
+                // Event::ErrorTooManyConnections(0, format!("{}", socket.local_addr().unwrap())))
+                .unwrap_or_default();
+        }
     }
 }
 
-async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, mut data_channel : BcReceiver<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, closer: Arc<Notify>,
+                               mut data_channel : BcReceiver<Bytes>, event_tx: BcSender<Event>) {
     loop {
-        // TODO how does this handle late joiners? - seems OK: late joiners only get future messages
-        if let Ok(out_buf) = data_channel.recv().await {
-            trace!("Got via BcReceiver channel - will write via TCP: {:?}", &out_buf[..]);
-            match writer.write(&out_buf[..]).await {
-                Ok(0) => { break; }
-                Ok(bytes_send) => {
-                    if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
-                        trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
-                    } else {
-                        trace!("StatBytesSend send through channel for TCP socket '{:?}'", writer);
+        tokio::select! {
+            close_sig = closer.notified() => {
+                break;
+            }
+            received = data_channel.recv() => {
+                if let Ok(out_buf) = received {
+                    match writer.write(&out_buf[..]).await {
+                        Ok(0) => { break; }
+                        Ok(bytes_send) => {
+                            if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                                trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+                            }
+                        }
+                        Err(err) => {
+                            trace!("Error sending data through TCP socket '{:?}': {:?}", writer, err);
+                            break;
+                        }
                     }
-                }
-                Err(err) => {
-                    trace!("Error sending data through TCP socket '{:?}': {:?}", writer, err);
-                    break;
                 }
             }
         }
     }
 }
 
-async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, writer: Option<OwnedWriteHalf>, data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_writer_dummy(mut _writer: OwnedWriteHalf, closer : Arc<Notify>) {
+    closer.notified().await;
+}
+
+async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : Arc<Notify>,
+                               data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
     loop {
-        trace!("Waiting for incoming TCP data");
         match reader.read(&mut buf).await {
             Ok(0) => {
-                // reunite not really needed, but need to prevent the writer from being dropped
-                //  when the endpoint is unidirectional
-                if let Some(w) = writer { reader.reunite(w); }
-                break; } // Indicates the connection is closed.
+                closer.notify_one();
+                break;
+            }
+                // // reunite not really needed, but need to prevent the writer from being dropped
+                // //  when the endpoint is unidirectional
+                // if let Some(w) = writer { reader.reunite(w).is_ok(); }
+                // break; } // Indicates the connection is closed.
             Ok(bytes_received) => {
-                trace!("received bytes via tcp: {} bytes - {:?}", bytes_received, &buf[..bytes_received]);
-                // TODO StatsBytesReceived
                 let buf_to_send = Bytes::copy_from_slice(&buf[..bytes_received]);
-                trace!("buf_to_send: {:?}", buf_to_send);
-                event_tx.send(Event::StatBytesReceived(0, bytes_received)).expect("Error sending StatBytesReceived for incoming TCP socket.");
+                if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
+                    trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+                }
                 data_channel.send(buf_to_send).await.expect("Error sending received data through mpsc channel.");
-                trace!("Did send {} bytes buf_to_send via MpscChannel", bytes_received);
             }
             Err(err) => {
                 trace!("Error while receiving data via tcp: {}", err);
                 break;
             }
+        }
+    }
+}
+
+async fn run_tcp_reader_dummy(mut reader: OwnedReadHalf, closer : Arc<Notify>) {
+    let mut buf = BytesMut::with_capacity(1);
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                closer.notify_one();
+                break;
+            }
+            _ => {}
         }
     }
 }
@@ -423,22 +466,16 @@ async fn run_udp_udp_route(route : Arc<Route>,
         // collect statistics for rx
         if let Err(msg) = route_data_tx.send(Event::StatBytesReceived(0, bytes_received)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel for route '{}'", route.name);
         }
 
-        trace!("Received {} bytes from {}.", bytes_received, from_address);
         // TODO filter/transform
 
         match out_socket.send_to(&buf[..bytes_received],
                                  out_address.as_str()).await {
             Ok(bytes_send) => {
-                trace!("Successfully send {:?} bytes to {:?} through route '{}'", bytes_send, out_address.as_str(), route.name);
                 // collect statistics for tx
                 if let Err(msg) = route_data_tx.send(Event::StatBytesSend(0, bytes_send)) {
                     trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
-                } else {
-                    trace!("StatBytesSend send through channel for route '{}'", route.name);
                 }
             }
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
@@ -465,8 +502,6 @@ async fn run_udp_tcp_server_route(route : Arc<Route>,
         // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel");
         }
 
         // TODO filter/transform
@@ -474,11 +509,9 @@ async fn run_udp_tcp_server_route(route : Arc<Route>,
         let bytes_produced = send_buf.len();
 
         let _bytes_out = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
-        // FIXME collect outgoing statistics here, or in TCP writer?
+
         if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel");
         }
     }
 }
@@ -486,24 +519,19 @@ async fn run_udp_tcp_server_route(route : Arc<Route>,
 async fn run_tcp_server_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_socket : Arc<UdpSocket>, out_address : String, event_tx: BcSender<Event>) {
     loop {
         let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
-        trace!("got from from_tcp MpscReceiver channel: {:?}", bytes);
+
         // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel");
         }
 
         // TODO filter/transform
 
         match out_socket.send_to(&bytes[..], out_address.as_str()).await {
             Ok(bytes_send) => {
-                trace!("wrote {} bytes via UDP", bytes_send);
                 // collect statistics for tx
                 if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
                     trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
-                } else {
-                    trace!("StatBytesSend send through channel for route '{}'", route.name);
                 }
             }
             Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
@@ -521,27 +549,21 @@ async fn run_tcp_server_udp_route(route : Arc<Route>, mut in_receiver: MpscRecei
 async fn run_tcp_server_tcp_server_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
     loop {
         let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
-        trace!("got from from_tcp MpscReceiver channel: {:?}", bytes);
 
         // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel");
         }
 
         // TODO filter/transform
 
         // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
         // let bytes_produced = send_buf.len();
-
         let bytes_produced = bytes.len();
         let _bytes_out = out_sender.send(bytes.clone()).expect("Error forwarding outgoing data to sending sockets");
-        // FIXME collect outgoing statistics here, or in TCP writer?
+
         if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
-        } else {
-            trace!("StatBytesReceived send through channel");
         }
     }
 }

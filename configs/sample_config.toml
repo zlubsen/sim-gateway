@@ -58,7 +58,7 @@ in_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind
 out_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158" }
 buffer_size = 32768
 flow_mode = "unidirectional"
-enabled = false
+enabled = true
 
 [[routes]]
 name = "udp-tcp-2way"
@@ -88,9 +88,9 @@ enabled = false
 name = "tcp-tcp"
 in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158"}
 out_point = { uri = "tcp://192.168.8.255:3009", interface = "192.168.8.158"}
-flow_mode = "bidirectional"
+flow_mode = "unidirectional"
 block_host = false
-enabled = true
+enabled = false
 
 [[routes]]
 name = "tcp-tcp-2way"

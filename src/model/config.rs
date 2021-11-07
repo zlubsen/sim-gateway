@@ -1,17 +1,19 @@
-use strum::{EnumString, IntoStaticStr};
 use std::net::{IpAddr, SocketAddrV4};
 use std::sync::{Arc, RwLock};
-use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use std::str::FromStr;
 use std::convert::TryFrom;
 use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::error::Error;
 
+use strum::{EnumString, IntoStaticStr};
 use log::{error};
-
 use lazy_static::lazy_static;
-use crate::runtime::{Filter, Transformer};
+
+use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
+use crate::model::constants::*;
+
+use crate::runtime::{Filter, Transformer}; // TODO should not be defined in runtime - runtime already depends on config?
 
 lazy_static! {
     static ref CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
@@ -132,13 +134,7 @@ impl TryFrom<&RouteSpec> for Route {
     fn try_from(spec: &RouteSpec) -> Result<Self, Self::Error> {
         let name = String::from(spec.name.as_str()); // TODO name cannot be empty string
         let in_point = EndPoint::try_from(&spec.in_point)?;
-        // let in_point = if let Some(cast_type) = &spec.in_point_cast_type {
-        //     in_point.add_cast_type(cast_type)?
-        // } else { in_point };
         let out_point = EndPoint::try_from(&spec.out_point)?;
-        // let out_point = if let Some(cast_type) = &spec.out_point_cast_type {
-        //     out_point.add_cast_type(cast_type)?
-        // } else { out_point };
         let buffer_size = spec.buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE_BYTES);
         let max_connections = spec.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
 
@@ -163,12 +159,6 @@ impl TryFrom<&RouteSpec> for Route {
         })
     }
 }
-
-const DEFAULT_BUFFER_SIZE_BYTES: usize = 32768;
-const DEFAULT_MAX_CONNECTIONS : usize = 10;
-const DEFAULT_TTL : u32 = 64; // default for unix and mac
-const DEFAULT_BLOCK_HOST : bool = true;
-const DEFAULT_ENABLED : bool = true;
 
 #[derive(Clone, Debug)]
 pub struct EndPoint {

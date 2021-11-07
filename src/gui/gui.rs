@@ -25,7 +25,6 @@ use log::{debug};
 use crate::events::{Command, parse_command, Event};
 use crate::model::config::Config;
 
-const RENDER_RATE : Duration = Duration::from_millis(1000);
 const PROMPT_START : &str = " $ ";
 
 struct App {

@@ -10,19 +10,17 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
 use tokio::net::{UdpSocket, TcpListener};
 use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::Semaphore;
 use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender};
 use tokio::sync::mpsc::{channel as mpsc_channel, Receiver as MpscReceiver, Sender as MpscSender};
-// use tokio::sync::oneshot::{channel as os_channel, Receiver as OsReceiver, Sender as OsSender};
 use tokio::sync::Notify;
-use tokio::time::Duration;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, interval};
 
-use crate::events::{Command, Event};
+use crate::events::{Command, Event, Statistics};
 use crate::model::config::*;
 use crate::model::config::FlowMode::BiDirectional;
 use crate::model::constants::*;
-
-const COMMAND_POLL_FREQ_MS : u64 = 200;
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -45,46 +43,135 @@ impl Display for RuntimeError {
 
 pub async fn start_runtime(mut command_rx: BcReceiver<Command>, event_tx: BcSender<Event>) {
     // spawn routes
-    Config::current().routes.iter().filter(|r|r.enabled).for_each(|route| {
+    let route_handles : Vec<JoinHandle<()>> = Config::current().routes.iter().filter(|r|r.enabled).map(|route| {
         let r = Arc::new(route.clone());
         let event_channel = event_tx.clone();
         tokio::spawn( async move {
             start_route(r, event_channel).await;
-        });
-    });
-    // TODO collect the spawned task handles
+        })
+    }).collect();
+
+    // TODO review channel capacity
+    let (stats_tx , stats_rx) : (MpscSender<Statistics>, MpscReceiver<Statistics>) = mpsc_channel(STATS_CHANNEL_CAPACITY);
+    let stats_collector_handle =
+        tokio::spawn(run_stats_collector(event_tx.subscribe(), stats_tx));
 
     // listen for events when running headless
-    if Config::current().mode == Mode::Headless {
-        let mut event_rx = event_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                if let Ok(event) = event_rx.recv().await {
-                    match event {
-                        Event::Message(msg) => { info!("{}", msg); }
-                        Event::Error(msg) => { error!("{}", msg); }
-                        _ => {}
-                        // Event::StatBytesReceived(_, _) => {}
-                        // Event::StatBytesSend(_, _) => {}
-                        // Event::ErrorTooManyConnections(_, _) => {}
-                    }
-                }
-            }
-        });
-    }
+    let cli_msg_handle = if Config::current().mode == Mode::Headless {
+        Some(tokio::spawn(run_cli_messenger(event_tx.subscribe())))
+    } else { None };
+
+    // print statistics when running headless
+    let cli_stats_printer_handle = if Config::current().mode == Mode::Headless {
+        Some(tokio::spawn(run_stats_cli_printer(stats_rx)))
+    } else { None };
 
     // wait for runtime commands / shutdown.
     loop {
-        tokio::time::sleep(Duration::from_millis(COMMAND_POLL_FREQ_MS)).await;
-        let received_command = command_rx.try_recv();
-        if let Ok(command) = received_command {
+        if let Ok(command) = command_rx.recv().await {
             match command {
                 Command::Quit => {
+                    // cleanup tasks
+                    if let Some(handle) = cli_msg_handle { handle.abort(); }
+                    if let Some(handle) = cli_stats_printer_handle { handle.abort(); }
+                    stats_collector_handle.abort();
+                    for r in route_handles {
+                        r.abort();
+                    }
                     break;
                 }
                 _ => {}
             }
         }
+    }
+}
+
+/// Spawns a task that listens for gateway events and prints
+/// selected types (Event::Message, Event::Error) to the stdout (CLI).
+/// Prints at info or error log levels.
+async fn run_cli_messenger(mut event_rx: BcReceiver<Event>) {
+    loop {
+        if let Ok(event) = event_rx.recv().await {
+            match event {
+                Event::Message(msg) => { info!("{}", msg); }
+                Event::Error(msg) => { error!("{}", msg); }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Receives, processes and periodically publishes statistics
+/// on the data flowing through the gate
+async fn run_stats_collector(mut event_rx: BcReceiver<Event>, publisher: MpscSender<Statistics>) {
+    let mut total_rx : u64 = 0;
+    let mut total_tx: u64 = 0;
+    let mut window_rx: f64 = 0.0;
+    let mut window_tx: f64 = 0.0;
+    let mut interval = interval(Duration::from_secs(STATS_AGGREGATION_WINDOW_SECS));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let avg_rx = window_rx / STATS_AGGREGATION_WINDOW_SECS as f64;
+                let avg_tx = window_tx / STATS_AGGREGATION_WINDOW_SECS as f64;
+                publisher.send(Statistics::AverageBytes(0, avg_rx, avg_tx)).await.expect("Error publishing stats");
+                window_rx = 0.0;
+                window_tx = 0.0;
+            }
+            result = event_rx.recv() => {
+                if let Ok(event) = result {
+                    match event {
+                        Event::Message(_) => {}
+                        Event::Error(_) => {}
+                        Event::SocketConnected(_scheme, _address) => {}
+                        Event::SocketDisconnected(_scheme, _address) => {}
+                        Event::StatBytesReceived(_id, num_bytes) => {
+                            total_rx += total_rx + num_bytes as u64;
+                            window_rx += window_rx + num_bytes as f64;
+                            publisher.send(Statistics::TotalBytes(0, total_rx, total_tx)).await.expect("Error publishing stats");
+                        }
+                        Event::StatBytesSend(_id, num_bytes) => {
+                            total_tx += total_tx + num_bytes as u64;
+                            window_tx += window_tx + num_bytes as f64;
+                            publisher.send(Statistics::TotalBytes(0, total_rx, total_tx)).await.expect("Error publishing stats");
+                        }
+                        Event::ErrorTooManyConnections(_, _) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_stats_cli_printer(mut stats_rx: MpscReceiver<Statistics>) {
+    let mut total_rx : u64 = 0;
+    let mut total_tx : u64 = 0;
+    let mut avg_rx : f64 = 0.0;
+    let mut avg_tx : f64 = 0.0;
+
+    let mut interval = interval(STATS_PRINTER_RATE_MS);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                info!("Average bytes: {} rx / {} tx", avg_rx, avg_tx);
+                info!("Total bytes: {} rx / {} tx", total_rx, total_tx);
+            }
+            stats = stats_rx.recv() => {
+                if let Some(event) = stats {
+                    match event {
+                        Statistics::TotalBytes(_id, rx, tx) => {
+                            total_rx = rx;
+                            total_tx = tx;
+                        }
+                        Statistics::AverageBytes(_id, rx, tx) => {
+                            avg_rx = rx;
+                            avg_tx = tx;
+                        }
+                    }
+                }
+            }
+        };
     }
 }
 
@@ -315,7 +402,6 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
     let sem = Arc::new(Semaphore::new(route.max_connections));
 
     loop {
-        // Permits should be dropped after a spawned socket task has finished.
         if let Ok(permit) = sem.clone().acquire_owned().await {
             let (stream, _addr) = socket.accept().await
                 .expect(format!("Error establishing incoming TCP connection for route '{}'.", route.name).as_str());
@@ -362,15 +448,19 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
                 }
                 (None, None) => {break;}
             };
+            // task to wait for task joins
             tokio::spawn(async move {
                 read_handle.await.unwrap();
                 write_handle.await.unwrap();
-                drop(permit);
+                drop(permit); // Permits should be dropped after a spawned socket task has finished.
             });
         } else {
+            // TODO
             event_tx.send(
-                Event::Error(format!("Too many connection on TCP socket {} for route '{}'", socket.local_addr().unwrap(), route.name)))
-                // Event::ErrorTooManyConnections(0, format!("{}", socket.local_addr().unwrap())))
+                Event::Error(
+                    format!("Error acquiring a permit for TCP connection on socket {} for route '{}'",
+                            socket.local_addr().unwrap(),
+                            route.name)))
                 .unwrap_or_default();
         }
     }
@@ -380,7 +470,7 @@ async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, c
                                mut data_channel : BcReceiver<Bytes>, event_tx: BcSender<Event>) {
     loop {
         tokio::select! {
-            close_sig = closer.notified() => {
+            _ = closer.notified() => {
                 break;
             }
             received = data_channel.recv() => {
@@ -404,6 +494,7 @@ async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, c
 }
 
 async fn run_tcp_writer_dummy(mut _writer: OwnedWriteHalf, closer : Arc<Notify>) {
+    // just wait for the connection to close
     closer.notified().await;
 }
 
@@ -417,10 +508,6 @@ async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, cl
                 closer.notify_one();
                 break;
             }
-                // // reunite not really needed, but need to prevent the writer from being dropped
-                // //  when the endpoint is unidirectional
-                // if let Some(w) = writer { reader.reunite(w).is_ok(); }
-                // break; } // Indicates the connection is closed.
             Ok(bytes_received) => {
                 let buf_to_send = Bytes::copy_from_slice(&buf[..bytes_received]);
                 if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
@@ -456,7 +543,7 @@ fn message_is_from_own_host(host: IpAddr, received_from : IpAddr) -> bool {
 async fn run_udp_udp_route(route : Arc<Route>,
                            in_socket : Arc<UdpSocket>, out_socket : Arc<UdpSocket>, out_address : String,
                            mut buf: BytesMut,
-                           route_data_tx : BcSender<Event>) {
+                           event_tx: BcSender<Event>) {
     loop {
         let (bytes_received, from_address) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
 
@@ -464,7 +551,7 @@ async fn run_udp_udp_route(route : Arc<Route>,
             message_is_from_own_host(route.in_point.interface, from_address.ip()) { continue }
 
         // collect statistics for rx
-        if let Err(msg) = route_data_tx.send(Event::StatBytesReceived(0, bytes_received)) {
+        if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
@@ -474,7 +561,7 @@ async fn run_udp_udp_route(route : Arc<Route>,
                                  out_address.as_str()).await {
             Ok(bytes_send) => {
                 // collect statistics for tx
-                if let Err(msg) = route_data_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
                     trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
                 }
             }
@@ -508,7 +595,7 @@ async fn run_udp_tcp_server_route(route : Arc<Route>,
         let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
         let bytes_produced = send_buf.len();
 
-        let _bytes_out = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
+        let _num_receivers = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
 
         if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);

@@ -80,7 +80,7 @@ impl App {
     }
 }
 
-pub fn start_gui(mut command_rx: Receiver<Command>, command_tx : Sender<Command>, mut data_rx: Receiver<Event>) -> Result<JoinHandle<()>, Error> {
+pub fn start_gui(mut command_rx: Receiver<Command>, command_tx : Sender<Command>, mut event_rx: Receiver<Event>) -> Result<JoinHandle<()>, Error> {
     let mut app = App {
         active_area : Area::Prompt,
         prompt : String::default(),
@@ -182,7 +182,7 @@ pub fn start_gui(mut command_rx: Receiver<Command>, command_tx : Sender<Command>
             }
 
             // handle incoming data
-            match data_rx.try_recv() {
+            match event_rx.try_recv() {
                 Ok(event) => { debug!("gui received event: {:?}", event) }
                 Err(err) => { debug!("gui data_rx.try_recv() gave an error {:?}", err)}
             }

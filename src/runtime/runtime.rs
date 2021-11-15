@@ -8,7 +8,7 @@ use log::{info, error, trace};
 use bytes::{Bytes, BytesMut};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
-use tokio::net::{UdpSocket, TcpListener};
+use tokio::net::{UdpSocket, TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast::{channel as bc_channel, Receiver as BcReceiver, Sender as BcSender};
@@ -176,11 +176,26 @@ async fn run_stats_cli_printer(mut stats_rx: MpscReceiver<Statistics>) {
 }
 
 async fn start_route(route : Arc<Route>, event_tx: BcSender<Event>) {
-    match (&route.in_point.scheme, &route.out_point.scheme) {
-        (Scheme::UDP, Scheme::UDP) => { create_route_udp_udp(route, event_tx.clone()).await; }
-        (Scheme::UDP, Scheme::TCP) => { create_route_udp_tcp(route, event_tx.clone()).await; }
-        (Scheme::TCP, Scheme::TCP) => { create_route_tcp_tcp(route, event_tx.clone()).await; }
-        (Scheme::TCP, Scheme::UDP) => { create_route_tcp_udp(route, event_tx.clone()).await; }
+    match (&route.in_point.scheme, &route.in_point.socket_type, &route.out_point.scheme, &route.out_point.socket_type) {
+        (Scheme::UDP, _, Scheme::UDP, _)
+            => { create_route_udp_udp(route, event_tx).await; }
+        (Scheme::UDP, _, Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server))
+            => { create_route_udp_tcp_server(route, event_tx).await; }
+        (Scheme::UDP, _, Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client))
+        => { create_route_udp_tcp_client(route, event_tx).await; }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server), Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server))
+            => { create_route_tcp_tcp_servers(route, event_tx).await; }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client), Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server))
+            => { create_route_tcp_client_tcp_server(route, event_tx).await; }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server), Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client))
+            => { create_route_tcp_server_tcp_client(route, event_tx).await; }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client), Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client))
+            => { create_route_tcp_tcp_clients(route, event_tx).await }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Server), Scheme::UDP, _)
+            => { create_route_tcp_server_udp(route, event_tx).await; }
+        (Scheme::TCP, SocketType::TcpSocketType(TcpSocketType::Client), Scheme::UDP, _)
+            => { create_route_tcp_client_udp(route, event_tx).await; }
+        (_,_,_,_) => { event_tx.send(Event::Error(format!("Invalid route definition for '{}'", route.name))).unwrap_or_default(); }
     };
 }
 
@@ -226,8 +241,8 @@ async fn create_route_udp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
 
 /// A route that connects a UDP socket to a TCP Server socket.
 /// Bytes received via the UDP socket are forwarded to connections attached to the TCP socket.
-async fn create_route_udp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    event_tx.send(Event::Message(format!("Creating udp-tcp route '{}'", route.name))).unwrap_or_default();
+async fn create_route_udp_tcp_server(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating udp-tcp(server) route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = Arc::new(create_udp_socket(&route.in_point).await);
     let out_socket = create_tcp_server_socket(&route.out_point).await;
@@ -241,36 +256,84 @@ async fn create_route_udp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
     let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
 
     // accept loop for incoming TCP connections
-    let _handle_accept = {
+    let handle_accept = {
         let from_tcp_sender_opt = if BiDirectional == route.flow_mode {
             Some(from_tcp_sender.clone())
         } else { None };
         tokio::spawn(
-            run_tcp_accept_loop(route.clone(), out_socket, Some(to_tcp_sender.clone()), from_tcp_sender_opt, event_tx.clone())
+            run_tcp_accept_loop(route.clone(), out_socket,
+                                Some(to_tcp_sender.clone()), from_tcp_sender_opt,
+                                event_tx.clone())
         )
     };
 
     let task_handle = tokio::spawn(
-        run_udp_tcp_server_route(route.clone(), in_socket.clone(), to_tcp_sender.clone(), buf, event_tx.clone())
+        run_udp_tcp_route(route.clone(), in_socket.clone(),
+                          to_tcp_sender.clone(), buf, event_tx.clone())
     );
-
     let task_handle_reverse = if BiDirectional == route.flow_mode {
         let out_address = format!("{}:{}",
                                   route.in_point.socket.ip(),
                                   route.in_point.socket.port());
         Some(tokio::spawn(
-            run_tcp_server_udp_route(route.clone(), from_tcp_receiver, in_socket.clone(), out_address, event_tx.clone())
+            run_tcp_udp_route(route.clone(), from_tcp_receiver,
+                              in_socket.clone(), out_address, event_tx.clone())
         ))
     } else { None };
 
-    task_handle.await.expect(format!("Route {} task (udp->tcp) panicked", route.name).as_str());
+    task_handle.await.expect(format!("Route {} task udp->tcp(server) panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
-        handle.await.expect(format!("Route {} task (udp<-tcp) panicked", route.name).as_str());
+        handle.await.expect(format!("Route {} task udp<-tcp(server) panicked", route.name).as_str());
     }
+    handle_accept.await.expect(format!("Route {} task udp->tcp(server) panicked - accept loop", route.name).as_str());
 }
 
-async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    event_tx.send(Event::Message(format!("Creating tcp-tcp route '{}'", route.name))).unwrap_or_default();
+async fn create_route_udp_tcp_client(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating udp-tcp(client) route '{}'", route.name))).unwrap_or_default();
+
+    let in_socket = Arc::new(create_udp_socket(&route.in_point).await);
+    let (out_socket_reader, out_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
+
+    // TODO move inside run_ functions?
+    let mut buf = BytesMut::with_capacity(route.buffer_size);
+    buf.resize(route.buffer_size, 0);
+
+    // TODO make channel capacities a setting
+    let (to_tcp_sender, to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let notifier = Arc::new(Notify::new());
+
+    let tcp_write_handle = tokio::spawn(
+        run_tcp_writer(route.clone(), out_socket_writer, notifier.clone(),
+                       to_tcp_receiver, event_tx.clone())
+    );
+    let tcp_read_handle = create_bidi_tcp_client_reader(route.clone(), out_socket_reader,
+                                                        notifier.clone(), from_tcp_sender, event_tx.clone()).await;
+
+    let task_handle = tokio::spawn(
+        run_udp_tcp_route(route.clone(), in_socket.clone(),
+                          to_tcp_sender.clone(), buf, event_tx.clone())
+    );
+    let task_handle_reverse = if BiDirectional == route.flow_mode {
+        let out_address = format!("{}:{}",
+                                  route.in_point.socket.ip(),
+                                  route.in_point.socket.port());
+        Some(tokio::spawn(
+            run_tcp_udp_route(route.clone(), from_tcp_receiver,
+                              in_socket.clone(), out_address, event_tx.clone())
+        ))
+    } else { None };
+
+    task_handle.await.expect(format!("Route {} task udp->tcp(client) panicked", route.name).as_str());
+    if let Some(handle) = task_handle_reverse {
+        handle.await.expect(format!("Route {} task udp<-tcp(client) panicked", route.name).as_str());
+    }
+    tcp_read_handle.await.expect(format!("TCP reader task failed to join for route '{}'", route.name).as_str());
+    tcp_write_handle.await.expect(format!("TCP writer task failed to join for route '{}'", route.name).as_str());
+}
+
+async fn create_route_tcp_tcp_servers(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(server)-tcp(server) route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = create_tcp_server_socket(&route.in_point).await;
     let out_socket = create_tcp_server_socket(&route.out_point).await;
@@ -280,7 +343,7 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
     let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
     let (to_tcp_sender_reverse, _to_tcp_receiver_reverse) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
 
-    let _handle_accept_in_socket = {
+    let handle_accept_in_socket = {
         let to_tcp_sender_reverse_opt = if BiDirectional == route.flow_mode {
             Some(to_tcp_sender_reverse.clone())
         } else { None };
@@ -288,7 +351,7 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
             run_tcp_accept_loop(route.clone(), in_socket, to_tcp_sender_reverse_opt, Some(from_tcp_sender.clone()), event_tx.clone())
         )
     };
-    let _handle_accept_out_socket = {
+    let handle_accept_out_socket = {
         let from_tcp_sender_reverse_opt = if BiDirectional == route.flow_mode {
             Some(from_tcp_sender_reverse.clone())
         } else { None };
@@ -298,12 +361,12 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
     };
 
     let task_handle = tokio::spawn(
-        run_tcp_server_tcp_server_route(route.clone(), from_tcp_receiver, to_tcp_sender.clone(), event_tx.clone())
+        run_tcp_tcp_route(route.clone(), from_tcp_receiver, to_tcp_sender.clone(), event_tx.clone())
     );
 
     let task_handle_reverse = if BiDirectional == route.flow_mode {
         Some(tokio::spawn(
-            run_tcp_server_tcp_server_route(route.clone(), from_tcp_receiver_reverse, to_tcp_sender_reverse.clone(), event_tx.clone())
+            run_tcp_tcp_route(route.clone(), from_tcp_receiver_reverse, to_tcp_sender_reverse.clone(), event_tx.clone())
         ))
     } else { None };
 
@@ -311,10 +374,158 @@ async fn create_route_tcp_tcp(route : Arc<Route>, event_tx: BcSender<Event>) {
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task (tcp<-tcp) panicked", route.name).as_str());
     }
+    handle_accept_in_socket.await.expect(format!("Route {} task tcp(server)->tcp(server) panicked - accept loop", route.name).as_str());
+    handle_accept_out_socket.await.expect(format!("Route {} task tcp(server)->tcp(server) panicked - accept loop", route.name).as_str());
 }
 
-async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
-    event_tx.send(Event::Message(format!("Creating tcp-udp route '{}'", route.name))).unwrap_or_default();
+async fn create_route_tcp_tcp_clients(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(client)-tcp(client) route '{}'", route.name))).unwrap_or_default();
+
+    let (in_socket_reader, in_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
+    let (out_socket_reader, out_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
+
+    let (in_to_tcp_sender, in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let in_notifier = Arc::new(Notify::new());
+
+    let (out_to_tcp_sender, out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let out_notifier = Arc::new(Notify::new());
+
+    let in_tcp_write_handle = tokio::spawn(
+        run_tcp_writer(route.clone(), in_socket_writer, in_notifier.clone(),
+                       in_to_tcp_receiver, event_tx.clone())
+    );
+    let in_tcp_read_handle = create_bidi_tcp_client_reader(route.clone(), in_socket_reader,
+                                                            in_notifier.clone(), in_from_tcp_sender, event_tx.clone()).await;
+    let out_tcp_write_handle = tokio::spawn(
+        run_tcp_writer(route.clone(), out_socket_writer, out_notifier.clone(),
+                       out_to_tcp_receiver, event_tx.clone())
+    );
+    let out_tcp_read_handle = create_bidi_tcp_client_reader(route.clone(), out_socket_reader,
+                                                        out_notifier.clone(), out_from_tcp_sender, event_tx.clone()).await;
+
+    let task_handle = tokio::spawn(
+        run_tcp_tcp_route(route.clone(), in_from_tcp_receiver, out_to_tcp_sender.clone(), event_tx.clone())
+    );
+
+    let task_handle_reverse = if BiDirectional == route.flow_mode {
+        Some(tokio::spawn(
+            run_tcp_tcp_route(route.clone(), out_from_tcp_receiver, in_to_tcp_sender.clone(), event_tx.clone())
+        ))
+    } else { None };
+
+    task_handle.await.expect(format!("Route {} task tcp(client)->tcp(client) panicked", route.name).as_str());
+    if let Some(handle) = task_handle_reverse {
+        handle.await.expect(format!("Route {} task tcp(client)<-tcp(client) panicked", route.name).as_str());
+    }
+    in_tcp_read_handle.await.expect(format!("TCP reader (in) task failed to join for route '{}'", route.name).as_str());
+    in_tcp_write_handle.await.expect(format!("TCP writer (in) task failed to join for route '{}'", route.name).as_str());
+    out_tcp_read_handle.await.expect(format!("TCP reader (out) task failed to join for route '{}'", route.name).as_str());
+    out_tcp_write_handle.await.expect(format!("TCP writer (out) task failed to join for route '{}'", route.name).as_str());
+}
+
+async fn create_route_tcp_server_tcp_client(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(server)-tcp(client) route '{}'", route.name))).unwrap_or_default();
+
+    let in_socket = create_tcp_server_socket(&route.out_point).await;
+    let (out_socket_reader, out_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
+
+    let (in_to_tcp_sender, _in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+
+    let (out_to_tcp_sender, out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let out_notifier = Arc::new(Notify::new());
+
+    let handle_accept = {
+        let to_tcp_sender_opt = if BiDirectional == route.flow_mode {
+            Some(in_to_tcp_sender.clone())
+        } else { None };
+        tokio::spawn(
+            run_tcp_accept_loop(route.clone(), in_socket, to_tcp_sender_opt, Some(in_from_tcp_sender), event_tx.clone())
+        )
+    };
+
+    let out_tcp_write_handle = tokio::spawn(
+        run_tcp_writer(route.clone(), out_socket_writer, out_notifier.clone(),
+                       out_to_tcp_receiver, event_tx.clone())
+    );
+    let out_tcp_read_handle = create_bidi_tcp_client_reader(route.clone(), out_socket_reader,
+                                                            out_notifier.clone(), out_from_tcp_sender, event_tx.clone()).await;
+
+    let task_handle = tokio::spawn(
+        run_tcp_tcp_route(route.clone(), in_from_tcp_receiver, out_to_tcp_sender.clone(), event_tx.clone())
+    );
+
+    let task_handle_reverse = if BiDirectional == route.flow_mode {
+        Some(tokio::spawn(
+            run_tcp_tcp_route(route.clone(), out_from_tcp_receiver, in_to_tcp_sender.clone(), event_tx.clone())
+        ))
+    } else { None };
+
+    task_handle.await.expect(format!("Route {} task tcp(server)->tcp(client) panicked", route.name).as_str());
+    if let Some(handle) = task_handle_reverse {
+        handle.await.expect(format!("Route {} task tcp(server)<-tcp(client) panicked", route.name).as_str());
+    }
+    handle_accept.await.expect(format!("Route {} task tcp(server)->udp panicked - accept loop", route.name).as_str());
+    out_tcp_read_handle.await.expect(format!("TCP reader (out) task failed to join for route '{}'", route.name).as_str());
+    out_tcp_write_handle.await.expect(format!("TCP writer (out) task failed to join for route '{}'", route.name).as_str());
+}
+async fn create_route_tcp_client_tcp_server(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(client)-tcp(server) route '{}'", route.name))).unwrap_or_default();
+
+    let (in_socket_reader, in_socket_writer) = create_tcp_client_socket(&route.in_point).await.into_split();
+    let out_socket = create_tcp_server_socket(&route.out_point).await;
+
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let (in_to_tcp_sender, in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let in_closer = Arc::new(Notify::new());
+
+    let (out_to_tcp_sender, _out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+
+    let tcp_read_handle = tokio::spawn(
+        run_tcp_reader(route.clone(), in_socket_reader, in_closer.clone(),
+                       in_from_tcp_sender, event_tx.clone())
+    );
+    let tcp_write_handle = create_bidi_tcp_client_writer(route.clone(), in_socket_writer,
+                                                         in_closer.clone(),
+                                                         in_to_tcp_receiver, event_tx.clone()).await;
+
+    // accept loop for incoming TCP connections
+    let handle_accept = {
+        let from_tcp_sender_opt = if BiDirectional == route.flow_mode {
+            Some(out_from_tcp_sender.clone())
+        } else { None };
+        tokio::spawn(
+            run_tcp_accept_loop(route.clone(), out_socket,
+                                Some(out_to_tcp_sender.clone()), from_tcp_sender_opt,
+                                event_tx.clone())
+        )
+    };
+
+    let task_handle = tokio::spawn(
+        run_tcp_tcp_route(route.clone(), in_from_tcp_receiver, out_to_tcp_sender.clone(), event_tx.clone())
+    );
+
+    let task_handle_reverse = if BiDirectional == route.flow_mode {
+        Some(tokio::spawn(
+            run_tcp_tcp_route(route.clone(), out_from_tcp_receiver, in_to_tcp_sender.clone(), event_tx.clone())
+        ))
+    } else { None };
+
+    task_handle.await.expect(format!("Route {} task tcp(client)->tcp(server) panicked", route.name).as_str());
+    if let Some(handle) = task_handle_reverse {
+        handle.await.expect(format!("Route {} task tcp(client)<-tcp(server) panicked", route.name).as_str());
+    }
+    handle_accept.await.expect(format!("Route {} task tcp(client)->tcp(server) panicked - accept loop", route.name).as_str());
+    tcp_read_handle.await.expect(format!("TCP reader (in) task failed to join for route '{}'", route.name).as_str());
+    tcp_write_handle.await.expect(format!("TCP writer (in) task failed to join for route '{}'", route.name).as_str());
+}
+
+async fn create_route_tcp_server_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(server)-udp route '{}'", route.name))).unwrap_or_default();
 
     let in_socket = create_tcp_server_socket(&route.in_point).await;
     let out_socket = Arc::new(create_udp_socket(&route.out_point).await);
@@ -328,7 +539,7 @@ async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
     let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
 
     // accept loop for incoming TCP connections
-    let _handle_accept = {
+    let handle_accept = {
         let to_tcp_sender_opt = if BiDirectional == route.flow_mode {
             Some(to_tcp_sender.clone())
         } else { None };
@@ -342,20 +553,67 @@ async fn create_route_tcp_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
                                   route.out_point.socket.ip(),
                                   route.out_point.socket.port());
         tokio::spawn(
-            run_tcp_server_udp_route(route.clone(), from_tcp_receiver, out_socket.clone(), out_address, event_tx.clone())
+            run_tcp_udp_route(route.clone(), from_tcp_receiver, out_socket.clone(), out_address, event_tx.clone())
         )
     };
 
     let task_handle_reverse = if BiDirectional == route.flow_mode {
         Some(tokio::spawn(
-            run_udp_tcp_server_route(route.clone(), out_socket.clone(), to_tcp_sender.clone(), buf, event_tx.clone())
+            run_udp_tcp_route(route.clone(), out_socket.clone(), to_tcp_sender.clone(), buf, event_tx.clone())
         ))
     } else { None };
 
-    task_handle.await.expect(format!("Route {} task (udp->tcp) panicked", route.name).as_str());
+    task_handle.await.expect(format!("Route {} task tcp(server)->udp panicked", route.name).as_str());
     if let Some(handle) = task_handle_reverse {
-        handle.await.expect(format!("Route {} task (udp<-tcp) panicked", route.name).as_str());
+        handle.await.expect(format!("Route {} task tcp(server)<-udp panicked", route.name).as_str());
     }
+    handle_accept.await.expect(format!("Route {} task tcp(server)->udp panicked - accept loop", route.name).as_str());
+}
+
+async fn create_route_tcp_client_udp(route : Arc<Route>, event_tx: BcSender<Event>) {
+    event_tx.send(Event::Message(format!("Creating tcp(client)-udp route '{}'", route.name))).unwrap_or_default();
+
+    let (in_socket_reader, in_socket_writer) = create_tcp_client_socket(&route.in_point).await.into_split();
+    let out_socket = Arc::new(create_udp_socket(&route.out_point).await);
+
+    // TODO move inside run_ functions?
+    let mut buf = BytesMut::with_capacity(route.buffer_size);
+    buf.resize(route.buffer_size, 0);
+
+    // TODO make channel capacities a setting
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(10);
+    let (to_tcp_sender, to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(10);
+    let closer = Arc::new(Notify::new());
+
+    let tcp_read_handle = tokio::spawn(
+        run_tcp_reader(route.clone(), in_socket_reader, closer.clone(),
+                       from_tcp_sender, event_tx.clone())
+    );
+    let tcp_write_handle = create_bidi_tcp_client_writer(route.clone(), in_socket_writer,
+                                                         closer.clone(),
+                                                         to_tcp_receiver, event_tx.clone()).await;
+
+    let task_handle = {
+        let out_address = format!("{}:{}",
+                                  route.out_point.socket.ip(),
+                                  route.out_point.socket.port());
+        tokio::spawn(
+            run_tcp_udp_route(route.clone(), from_tcp_receiver, out_socket.clone(), out_address, event_tx.clone())
+        )
+    };
+
+    let task_handle_reverse = if BiDirectional == route.flow_mode {
+        Some(tokio::spawn(
+            run_udp_tcp_route(route.clone(), out_socket.clone(), to_tcp_sender.clone(), buf, event_tx.clone())
+        ))
+    } else { None };
+
+    task_handle.await.expect(format!("Route {} task udp->tcp(client) panicked", route.name).as_str());
+    if let Some(handle) = task_handle_reverse {
+        handle.await.expect(format!("Route {} task udp<-tcp(client) panicked", route.name).as_str());
+    }
+    tcp_read_handle.await.expect(format!("TCP reader task failed to join for route '{}'", route.name).as_str());
+    tcp_write_handle.await.expect(format!("TCP writer task failed to join for route '{}'", route.name).as_str());
 }
 
 async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
@@ -389,15 +647,46 @@ async fn create_udp_socket(endpoint : &EndPoint) -> UdpSocket {
     socket
 }
 
-async fn create_tcp_server_socket(endpoint : &EndPoint) -> TcpListener {
-    let listener_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.socket.port());
-    let listener = TcpListener::bind(listener_addr)
-        .await
-        .expect(format!("Error binding TCP listener socket for {:?}", listener_addr).as_str());
-
-    listener
+async fn create_tcp_client_socket(endpoint : &EndPoint) -> TcpStream {
+    let remote_addr = SocketAddrV4::new(*endpoint.socket.ip(), endpoint.socket.port());
+    TcpStream::connect(remote_addr).await
+        .expect(format!("Error connecting to remote TCP address {:?}", remote_addr).as_str())
 }
 
+async fn create_tcp_server_socket(endpoint : &EndPoint) -> TcpListener {
+    let listener_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, endpoint.socket.port());
+    TcpListener::bind(listener_addr).await
+        .expect(format!("Error binding TCP listener socket for {:?}", listener_addr).as_str())
+}
+
+/// Create task for a bidirectional route using a TCP client connection, writer half.
+/// Creates a dummy task for unidirectional routes.
+async fn create_bidi_tcp_client_reader(route : Arc<Route>, socket_reader: OwnedReadHalf, closer: Arc<Notify>, from_tcp_sender: MpscSender<Bytes>, event_tx: BcSender<Event>) -> JoinHandle<()> {
+    if BiDirectional == route.flow_mode {
+        tokio::spawn(
+            run_tcp_reader(route.clone(), socket_reader, closer,
+                           from_tcp_sender, event_tx.clone())
+        )
+    } else {
+        tokio::spawn(
+            run_tcp_reader_dummy(socket_reader, closer)
+        )
+    }
+}
+
+/// Create task for a bidirectional route using a TCP client connection, writer half.
+/// Creates a dummy task for unidirectional routes.
+async fn create_bidi_tcp_client_writer(route : Arc<Route>, socket_writer: OwnedWriteHalf, closer: Arc<Notify>, to_tcp_receiver: BcReceiver<Bytes>, event_tx: BcSender<Event>) -> JoinHandle<()> {
+    if BiDirectional == route.flow_mode {
+        tokio::spawn(run_tcp_writer(route.clone(), socket_writer, closer,
+                       to_tcp_receiver, event_tx.clone()))
+    } else {
+        tokio::spawn(run_tcp_writer_dummy(socket_writer, closer))
+    }
+}
+
+/// Runs the accept loop for TCP server sockets.
+/// Spawns tasks for established connections based on the route configuration.
 async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_sender_opt: Option<BcSender<Bytes>>, from_tcp_receiver_opt: Option<MpscSender<Bytes>>, event_tx: BcSender<Event>) {
     let sem = Arc::new(Semaphore::new(route.max_connections));
 
@@ -413,24 +702,24 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
                 (Some(ref to_tcp_sender), Some(ref from_tcp_receiver)) => {
 
                     (tokio::spawn(
-                        run_tcp_server_writer(route.clone(),
-                                              writer, notifier.clone(),
-                                              to_tcp_sender.subscribe(),
-                                              event_tx.clone())
+                        run_tcp_writer(route.clone(),
+                                       writer, notifier.clone(),
+                                       to_tcp_sender.subscribe(),
+                                       event_tx.clone())
                     ),
                      tokio::spawn(
-                        run_tcp_server_reader(route.clone(),
-                                              reader, notifier.clone(),
-                                              from_tcp_receiver.clone(),
-                                              event_tx.clone())
+                        run_tcp_reader(route.clone(),
+                                       reader, notifier.clone(),
+                                       from_tcp_receiver.clone(),
+                                       event_tx.clone())
                     ))
                 }
                 (Some(ref to_tcp_sender), None) => {
                     (tokio::spawn(
-                        run_tcp_server_writer(route.clone(),
-                                              writer, notifier.clone(),
-                                              to_tcp_sender.subscribe(),
-                                              event_tx.clone())
+                        run_tcp_writer(route.clone(),
+                                       writer, notifier.clone(),
+                                       to_tcp_sender.subscribe(),
+                                       event_tx.clone())
                     ),tokio::spawn(
                         run_tcp_reader_dummy(reader, notifier.clone())
                     ))
@@ -440,10 +729,10 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
                         run_tcp_writer_dummy(writer, notifier.clone())
                     ),
                      tokio::spawn(
-                        run_tcp_server_reader(route.clone(),
-                                              reader, notifier.clone(),
-                                              from_tcp_receiver.clone(),
-                                              event_tx.clone())
+                        run_tcp_reader(route.clone(),
+                                       reader, notifier.clone(),
+                                       from_tcp_receiver.clone(),
+                                       event_tx.clone())
                     ))
                 }
                 (None, None) => {break;}
@@ -466,8 +755,8 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
     }
 }
 
-async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, closer: Arc<Notify>,
-                               mut data_channel : BcReceiver<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, closer: Arc<Notify>,
+                        mut data_channel : BcReceiver<Bytes>, event_tx: BcSender<Event>) {
     loop {
         tokio::select! {
             _ = closer.notified() => {
@@ -493,13 +782,16 @@ async fn run_tcp_server_writer(route : Arc<Route>, mut writer: OwnedWriteHalf, c
     }
 }
 
+/// Task that holds on to (e.g., prevents dropping) a OwnedWriteHalf of a TcpStream
+/// until the connection closes, when indicated by the Notify-channel
 async fn run_tcp_writer_dummy(mut _writer: OwnedWriteHalf, closer : Arc<Notify>) {
     // just wait for the connection to close
     closer.notified().await;
 }
 
-async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : Arc<Notify>,
-                               data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
+
+async fn run_tcp_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : Arc<Notify>,
+                        data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
     loop {
@@ -523,6 +815,9 @@ async fn run_tcp_server_reader(route : Arc<Route>, mut reader: OwnedReadHalf, cl
     }
 }
 
+/// Task that holds on to (e.g., prevents dropping) a OwnedReadHalf of a TcpStream
+/// until the connection closes, as indicated by receiving 0 bytes.
+/// Notifies the OwnedWriteHalf task of the closing of the connection.
 async fn run_tcp_reader_dummy(mut reader: OwnedReadHalf, closer : Arc<Notify>) {
     let mut buf = BytesMut::with_capacity(1);
     loop {
@@ -576,10 +871,10 @@ async fn run_udp_udp_route(route : Arc<Route>,
     };
 }
 
-async fn run_udp_tcp_server_route(route : Arc<Route>,
-                                  in_socket : Arc<UdpSocket>, out_sender : BcSender<Bytes>,
-                                  mut buf: BytesMut,
-                                  event_tx: BcSender<Event>) {
+async fn run_udp_tcp_route(route : Arc<Route>,
+                           in_socket : Arc<UdpSocket>, out_sender : BcSender<Bytes>,
+                           mut buf: BytesMut,
+                           event_tx: BcSender<Event>) {
     loop {
         let (bytes_received, from_address) = in_socket.recv_from(&mut buf).await.expect("Error receiving from incoming Endpoint.");
 
@@ -603,7 +898,7 @@ async fn run_udp_tcp_server_route(route : Arc<Route>,
     }
 }
 
-async fn run_tcp_server_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_socket : Arc<UdpSocket>, out_address : String, event_tx: BcSender<Event>) {
+async fn run_tcp_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_socket : Arc<UdpSocket>, out_address : String, event_tx: BcSender<Event>) {
     loop {
         let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 
@@ -633,7 +928,7 @@ async fn run_tcp_server_udp_route(route : Arc<Route>, mut in_receiver: MpscRecei
 }
 
 // FIXME route sends received messages out via the same socket instead of the other
-async fn run_tcp_server_tcp_server_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
     loop {
         let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 

@@ -27,33 +27,33 @@ version = "0.1"
 ## Points have a mandatory 'uri' and 'interface' fields, and optional 'kind' and 'ttl' fields.
 ## A URI is of the form "scheme:://host:port"
 ## - scheme: udp or tcp
-## - host: a valid IP address (can be broad or multicast addresses)
+## - host: a valid IP address (can be broadcast or multicast addresses)
 ## - port: the port to use in the connection
 ## The 'interface' field contains the local interface address the endpoint is bound to.
 ## 'kind' indicates the type of connection/socket.
 ## - Valid values for UDP sockets: 'Unicast', 'Broadcast', 'Multicast'
 ## - Valid values for TCP sockets: 'Server', 'Client'
-## 'ttl' sets the Time-To-Live value for the packets send throught the sockets. Defaults to 64, or 1 for broadcast UDP sockets.
+## 'ttl' sets the Time-To-Live value (u32) for the packets send throught the sockets. Defaults to 64, or 1 for broadcast UDP sockets.
 #in_point = { uri = "udp://192.168.8.158:3001", interface = "192.168.8.158" }
 #out_point = { uri = "udp://192.168.8.255:3000", interface = "192.168.8.158", kind = "Broadcast" }
-## Size of the buffer in bytes for this route; Optional, defaults to 32768 bytes.
+## Size of the buffer in bytes (usize) for this route; Optional, defaults to 32768 bytes.
 #buffer_size = 32768
 ## 'max_connections' sets the maximum number of allowed connections for a TCP server socket. Defaults to 10.
 # max_connections = 10
 ## Flow mode sets whether data flows through the route one-way or two-way. Optional, defaults to 'unidirectional'
 ## - Valid values: 'unidirectional', 'bidirectional'
 #flow_mode = "bidirectional"
-## The 'block_host' option prevents routes from reading messages send by the own host IP.
+## The 'block_host' option (bool) prevents routes from reading messages send by the own host IP.
 ## This prevents routes from reading and sending its own messages endlessly.
 ## Optional, defaults to 'true'.
 # block_host = true
-## The 'enabled' option allows turning the route on or off.
+## The 'enabled' option (bool) allows turning the route on or off.
 ## 'Off' means the route is not created. Optional, defaults to 'true'.
 #enabled = false
 
 # inline table notation
 [[routes]]
-name = "udp-tcp"
+name = "udp-tcp(server)"
 in_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
 out_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158" }
 buffer_size = 32768
@@ -61,15 +61,15 @@ flow_mode = "unidirectional"
 enabled = false
 
 [[routes]]
-name = "udp-tcp-2way"
-in_point = { uri = "udp://192.168.8.158:3003", interface = "192.168.8.158", kind = "Unicast" }
-out_point = { uri = "tcp://192.168.8.158:3004", interface = "192.168.8.158" }
+name = "udp-tcp(server)-2way"
+in_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158" }
 buffer_size = 32768
 flow_mode = "bidirectional"
 enabled = false
 
 [[routes]]
-name = "tcp-udp"
+name = "tcp(server)-udp"
 in_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158" }
 out_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
 buffer_size = 32768
@@ -82,7 +82,7 @@ in_point = { uri = "udp://192.168.8.158:3001", interface = "192.168.8.158"}
 out_point = { uri = "udp://192.168.8.255:3000", interface = "192.168.8.158", kind = "Broadcast" }
 flow_mode = "unidirectional"
 block_host = false
-enabled = true
+enabled = false
 
 [[routes]]
 name = "udp-udp-bc-2way"
@@ -93,7 +93,7 @@ block_host = false
 enabled = false
 
 [[routes]]
-name = "tcp-tcp"
+name = "tcp(server)-tcp(server)"
 in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158"}
 out_point = { uri = "tcp://192.168.8.255:3009", interface = "192.168.8.158"}
 flow_mode = "unidirectional"
@@ -101,9 +101,39 @@ block_host = false
 enabled = false
 
 [[routes]]
-name = "tcp-tcp-2way"
+name = "tcp(server)-tcp(server)-2way"
 in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158"}
-out_point = { uri = "tcp://192.168.8.255:3009", interface = "192.168.8.158"}
+out_point = { uri = "tcp://192.168.8.158:3009", interface = "192.168.8.158"}
+flow_mode = "bidirectional"
+block_host = false
+enabled = true
+
+[[routes]]
+name = "udp-tcp(client)"
+in_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158", kind = "Client" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+enabled = false
+
+[[routes]]
+name = "tcp(client)-udp"
+in_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158", kind = "Client" }
+out_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+enabled = false
+
+[[routes]]
+name = "tcp(client)-tcp(client)-2way"
+in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158", kind = "Client" }
+out_point = { uri = "tcp://192.168.8.158:3009", interface = "192.168.8.158", kind = "Client" }
 flow_mode = "bidirectional"
 block_host = false
 enabled = false
+
+# Issues
+#Udp(uni)-tcp(server), unidirectional, tcp stopt als je er data over schrijft
+#Udp(uni)-tcp(server), bidirectional, udp stuurt uit op lo ipv geconfigureerde interface
+#tcp(server)-tcp(server), unidirectional, out socket stopt als je er data over schrijft
+#tcp(server)-tcp(server), bidirectional, verzend niet naar meerdere connected sockets

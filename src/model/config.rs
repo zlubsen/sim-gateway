@@ -109,8 +109,8 @@ pub struct Route {
     pub flow_mode : FlowMode,
     pub block_host : bool,
     pub enabled : bool,
-    // pub filters : Vec<dyn Filter>,
-    // pub transformers : Vec<dyn Transformer>,
+    // pub filters : Vec<Arc<dyn Filter>>,
+    // pub transformers : Vec<Arc<dyn Transformer>>,
 }
 
 impl Route {
@@ -124,6 +124,8 @@ impl Route {
             flow_mode,
             block_host,
             enabled,
+            // filters : Vec::new(),
+            // transformers : Vec::new(),
         }
     }
 }

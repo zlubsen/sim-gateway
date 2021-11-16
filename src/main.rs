@@ -41,15 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TODO make channel capacities a setting
     let (command_tx, command_rx) = channel(COMMAND_CHANNEL_CAPACITY);
-    let (event_tx, _event_rx) = channel(DATA_CHANNEL_CAPACITY);
+    let (event_tx, _event_rx) = channel(EVENT_CHANNEL_CAPACITY);
 
     let input_thread = start_input_thread(&mode, command_tx.clone());
 
     let gui_thread = match mode {
         Mode::Interactive => {
-            // let command_rx_gui = ;
-            // let command_tx_gui = ;
-            // let data_rx_gui = ;
             start_gui(
                 command_tx.subscribe(),
                 command_tx.clone(),
@@ -66,12 +63,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = runtime.enter();
     runtime.block_on( async { start_runtime(command_rx, event_tx).await});
     runtime.shutdown_background();
-
-    // loop {
-    //     if let Ok(event) = data_rx.try_recv() {
-    //         trace!("received data event: {:?}", event);
-    //     }
-    // }
 
     if Mode::Interactive == mode {
         if let Ok(gui_handle) = gui_thread {

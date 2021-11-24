@@ -82,7 +82,7 @@ in_point = { uri = "udp://192.168.8.158:3001", interface = "192.168.8.158"}
 out_point = { uri = "udp://192.168.8.255:3000", interface = "192.168.8.158", kind = "Broadcast" }
 flow_mode = "unidirectional"
 block_host = false
-enabled = true
+enabled = false
 
 [[routes]]
 name = "udp-udp-bc-2way"
@@ -131,6 +131,34 @@ out_point = { uri = "tcp://192.168.8.158:3009", interface = "192.168.8.158", kin
 flow_mode = "bidirectional"
 block_host = false
 enabled = false
+
+[[routes]]
+name = "udp-tcp(server)-filter-passall"
+in_point = { uri = "udp://192.168.8.158:3003", interface = "192.168.8.158", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.158:3004", interface = "192.168.8.158", kind = "Server" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+filters = ["PassAll"]
+enabled = false
+
+[[routes]]
+name = "udp-tcp(server)-filter-blockall"
+in_point = { uri = "udp://192.168.8.158:3005", interface = "192.168.8.158", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.158:3006", interface = "192.168.8.158", kind = "Server" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+filters = ["BlockAll"]
+enabled = false
+
+[[routes]]
+name = "udp-tcp(server)-transform-capitalize"
+in_point = { uri = "udp://192.168.8.158:3003", interface = "192.168.8.158", kind = "Unicast" }
+out_point = { uri = "tcp://192.168.8.158:3004", interface = "192.168.8.158", kind = "Server" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+#filters = ["PassAll"]
+transformers = ["CapitalizeUTF8"]
+enabled = true
 
 # Issues
 # Udp(uni)-tcp(server), bidirectional, udp stuurt uit op lo ipv geconfigureerde interface - nog algemeen issue welke interface gepakt wordt

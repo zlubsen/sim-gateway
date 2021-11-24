@@ -7,17 +7,21 @@ use std::fmt;
 use std::error::Error;
 
 use strum::{EnumString, IntoStaticStr};
-use log::{error};
+use log::{trace, error};
 use lazy_static::lazy_static;
 
 use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use crate::model::constants::*;
 
-use crate::runtime::{Filter, Transformer}; // TODO should not be defined in runtime - runtime already depends on config?
+use crate::model::filters::{filter_from_str, Filters};
+use crate::model::transformers::{transformer_from_str, Transformers};
 
 lazy_static! {
     static ref CURRENT_CONFIG: RwLock<Arc<Config>> = RwLock::new(Default::default());
 }
+
+type FilterList = Vec<Arc<Filters>>;
+type TransformerList = Vec<Arc<Transformers>>;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -109,12 +113,14 @@ pub struct Route {
     pub flow_mode : FlowMode,
     pub block_host : bool,
     pub enabled : bool,
-    // pub filters : Vec<Arc<dyn Filter>>,
-    // pub transformers : Vec<Arc<dyn Transformer>>,
+    pub filters : FilterList,
+    pub transformers : TransformerList,
 }
 
 impl Route {
-    pub fn new(name : String, in_point : EndPoint, out_point : EndPoint, buffer_size : usize, max_connections : usize, flow_mode : FlowMode, block_host : bool, enabled : bool) -> Route {
+    pub fn new(name : String, in_point : EndPoint, out_point : EndPoint, buffer_size : usize,
+               max_connections : usize, flow_mode : FlowMode, block_host : bool, enabled : bool,
+               filters : FilterList, transformers : TransformerList) -> Route {
         return Route {
             name,
             in_point,
@@ -124,8 +130,8 @@ impl Route {
             flow_mode,
             block_host,
             enabled,
-            // filters : Vec::new(),
-            // transformers : Vec::new(),
+            filters,
+            transformers,
         }
     }
 }
@@ -149,6 +155,22 @@ impl TryFrom<&RouteSpec> for Route {
         let block_host = spec.block_host.unwrap_or(DEFAULT_BLOCK_HOST);
         let enabled = spec.enabled.unwrap_or(DEFAULT_ENABLED);
 
+        let filters = if let Some(filter_names) = &spec.filters {
+            filter_names.iter().map(|name| filter_from_str(name.as_str()))
+                .map(|f| f.unwrap())
+                // .map(|f| {let x : Box<dyn Filter> = Box::new(f); x})
+                .map(|f| Arc::new(f))
+                .collect()
+        } else { Vec::new() };
+
+        let transformers = if let Some(transformer_names) = &spec.filters {
+            transformer_names.iter().map(|name| transformer_from_str(name.as_str()))
+                .map(|t| t.unwrap())
+                // .map(|t| {let x : Box<dyn Transformer> = Box::new(t); x})
+                .map(|t| Arc::new(t))
+                .collect()
+        } else { Vec::new() };
+
         Ok(Route{
             name,
             in_point,
@@ -157,7 +179,9 @@ impl TryFrom<&RouteSpec> for Route {
             max_connections,
             flow_mode,
             block_host,
-            enabled
+            enabled,
+            filters,
+            transformers,
         })
     }
 }

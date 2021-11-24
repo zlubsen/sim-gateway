@@ -18,14 +18,13 @@ pub struct MetaData {
 pub struct RouteSpec {
     pub name: String,
     pub in_point: EndPointSpec,
-    // pub in_point_type : Option<String>,
     pub out_point: EndPointSpec,
-    // pub out_point_type : Option<String>,
     pub buffer_size: Option<usize>,
     pub max_connections: Option<usize>,
     pub flow_mode : Option<String>,
     pub block_host : Option<bool>,
     pub enabled: Option<bool>,
+    pub filters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

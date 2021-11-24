@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::sync::Arc;
@@ -21,6 +21,10 @@ use crate::events::{Command, Event, Statistics};
 use crate::model::config::*;
 use crate::model::config::FlowMode::BiDirectional;
 use crate::model::constants::*;
+use crate::model::filters::passes_filters;
+use crate::model::transformers::apply_transformers;
+
+type TcpIn = (BytesMut, SocketAddr);
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -252,7 +256,7 @@ async fn create_route_udp_tcp_server(route : Arc<Route>, event_tx: BcSender<Even
     buf.resize(route.buffer_size, 0);
 
     let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
 
     // accept loop for incoming TCP connections
     let handle_accept = {
@@ -298,7 +302,7 @@ async fn create_route_udp_tcp_client(route : Arc<Route>, event_tx: BcSender<Even
     buf.resize(route.buffer_size, 0);
 
     let (to_tcp_sender, to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let notifier = Arc::new(Notify::new());
 
     let tcp_write_handle = tokio::spawn(
@@ -336,9 +340,9 @@ async fn create_route_tcp_tcp_servers(route : Arc<Route>, event_tx: BcSender<Eve
     let in_socket = create_tcp_server_socket(&route.in_point).await;
     let out_socket = create_tcp_server_socket(&route.out_point).await;
 
-    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (from_tcp_sender_reverse, from_tcp_receiver_reverse) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender_reverse, from_tcp_receiver_reverse) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let (to_tcp_sender_reverse, _to_tcp_receiver_reverse) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
 
     let handle_accept_in_socket = {
@@ -383,11 +387,11 @@ async fn create_route_tcp_tcp_clients(route : Arc<Route>, event_tx: BcSender<Eve
     let (out_socket_reader, out_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
 
     let (in_to_tcp_sender, in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let in_notifier = Arc::new(Notify::new());
 
     let (out_to_tcp_sender, out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let out_notifier = Arc::new(Notify::new());
 
     let in_tcp_write_handle = tokio::spawn(
@@ -430,10 +434,10 @@ async fn create_route_tcp_server_tcp_client(route : Arc<Route>, event_tx: BcSend
     let (out_socket_reader, out_socket_writer) = create_tcp_client_socket(&route.out_point).await.into_split();
 
     let (in_to_tcp_sender, _in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
 
     let (out_to_tcp_sender, out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let out_notifier = Arc::new(Notify::new());
 
     let handle_accept = {
@@ -477,12 +481,12 @@ async fn create_route_tcp_client_tcp_server(route : Arc<Route>, event_tx: BcSend
     let (in_socket_reader, in_socket_writer) = create_tcp_client_socket(&route.in_point).await.into_split();
     let out_socket = create_tcp_server_socket(&route.out_point).await;
 
-    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (in_from_tcp_sender, in_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let (in_to_tcp_sender, in_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
     let in_closer = Arc::new(Notify::new());
 
     let (out_to_tcp_sender, _out_to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
-    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (out_from_tcp_sender, out_from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
 
     let tcp_read_handle = tokio::spawn(
         run_tcp_reader(route.clone(), in_socket_reader, in_closer.clone(),
@@ -533,7 +537,7 @@ async fn create_route_tcp_server_udp(route : Arc<Route>, event_tx: BcSender<Even
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
 
-    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
 
     // accept loop for incoming TCP connections
@@ -578,7 +582,7 @@ async fn create_route_tcp_client_udp(route : Arc<Route>, event_tx: BcSender<Even
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
 
-    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<Bytes>, MpscReceiver<Bytes>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
     let (to_tcp_sender, to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
     let closer = Arc::new(Notify::new());
 
@@ -658,7 +662,7 @@ async fn create_tcp_server_socket(endpoint : &EndPoint) -> TcpListener {
 
 /// Create task for a bidirectional route using a TCP client connection, reader half.
 /// Creates a dummy task for unidirectional routes.
-async fn create_bidi_tcp_client_reader(route : Arc<Route>, socket_reader: OwnedReadHalf, closer: Arc<Notify>, from_tcp_sender: MpscSender<Bytes>, event_tx: BcSender<Event>) -> JoinHandle<()> {
+async fn create_bidi_tcp_client_reader(route : Arc<Route>, socket_reader: OwnedReadHalf, closer: Arc<Notify>, from_tcp_sender: MpscSender<TcpIn>, event_tx: BcSender<Event>) -> JoinHandle<()> {
     if BiDirectional == route.flow_mode {
         tokio::spawn(
             run_tcp_reader(route.clone(), socket_reader, closer,
@@ -684,7 +688,7 @@ async fn create_bidi_tcp_client_writer(route : Arc<Route>, socket_writer: OwnedW
 
 /// Runs the accept loop for TCP server sockets.
 /// Spawns tasks for established connections based on the route configuration.
-async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_sender_opt: Option<BcSender<Bytes>>, from_tcp_receiver_opt: Option<MpscSender<Bytes>>, event_tx: BcSender<Event>) {
+async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_sender_opt: Option<BcSender<Bytes>>, from_tcp_receiver_opt: Option<MpscSender<TcpIn>>, event_tx: BcSender<Event>) {
     let sem = Arc::new(Semaphore::new(route.max_connections));
 
     loop {
@@ -788,7 +792,7 @@ async fn run_tcp_writer_dummy(mut _writer: OwnedWriteHalf, closer : Arc<Notify>)
 
 
 async fn run_tcp_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : Arc<Notify>,
-                        data_channel : MpscSender<Bytes>, event_tx: BcSender<Event>) {
+                        data_channel : MpscSender<TcpIn>, event_tx: BcSender<Event>) {
     let mut buf = BytesMut::with_capacity(route.buffer_size);
     buf.resize(route.buffer_size, 0);
     loop {
@@ -798,13 +802,15 @@ async fn run_tcp_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : 
                 break;
             }
             Ok(bytes_received) => {
-                let buf_to_send = Bytes::copy_from_slice(&buf[..bytes_received]);
+                // FIXME now always copying the whole buf
+                // let buf_to_send = Bytes::copy_from_slice(&buf[..bytes_received]);
+                let buf_to_send = BytesMut::from(&buf[..bytes_received]);
                 if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
                     event_tx.send(Event::Error(
                         format!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg)
                     )).unwrap_or_default();
                 }
-                data_channel.send(buf_to_send).await.expect("Error sending received data through mpsc channel.");
+                data_channel.send((buf_to_send, reader.peer_addr().unwrap())).await.expect("Error sending received data through mpsc channel.");
             }
             Err(err) => {
                 event_tx.send(Event::Error(format!("Error while receiving data via tcp: {}", err))).unwrap_or_default();
@@ -851,22 +857,23 @@ async fn run_udp_udp_route(route : Arc<Route>,
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
-        // TODO filter/transform
-
-        match out_socket.send_to(&buf[..bytes_received],
-                                 out_address.as_str()).await {
-            Ok(bytes_send) => {
-                // collect statistics for tx
-                if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
-                    trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+        if passes_filters(&buf, route.filters.iter(), &&*&(bytes_received, from_address)) {
+            // TODO transform
+            match out_socket.send_to(&buf[..bytes_received],
+                                     out_address.as_str()).await {
+                Ok(bytes_send) => {
+                    // collect statistics for tx
+                    if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                        trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+                    }
                 }
-            }
-            Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(err) => {
-                error!("{}", err);
-                break;
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(err) => {
+                    error!("{}", err);
+                    break;
+                }
             }
         }
     };
@@ -887,67 +894,73 @@ async fn run_udp_tcp_route(route : Arc<Route>,
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
-        // TODO filter/transform
-        let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
-        let bytes_produced = send_buf.len();
+        trace!("testing filters");
+        if passes_filters(&buf, route.filters.iter(), &&*&(bytes_received, from_address)) {
+            // TODO transform
+            trace!("should do some transforms now");
+            let send_buf = apply_transformers(&buf, route.transformers.iter(), &&(bytes_received, from_address)).freeze();
 
-        let _num_receivers = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
-        trace!("_num_receivers: {}", _num_receivers);
+            // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
+            let bytes_produced = send_buf.len();
 
-        if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
-            trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+            let _num_receivers = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
+
+            if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
+                trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+            }
         }
     }
 }
 
-async fn run_tcp_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_socket : Arc<UdpSocket>, out_address : String, event_tx: BcSender<Event>) {
+async fn run_tcp_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<TcpIn>, out_socket : Arc<UdpSocket>, out_address : String, event_tx: BcSender<Event>) {
     loop {
-        let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
+        let (bytes, from_address) = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 
         // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
-        // TODO filter/transform
-
-        match out_socket.send_to(&bytes[..], out_address.as_str()).await {
-            Ok(bytes_send) => {
-                // collect statistics for tx
-                if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
-                    trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+        if passes_filters(&bytes, route.filters.iter(), &&*&(bytes.len(), from_address)) {
+            // TODO transform
+            match out_socket.send_to(&bytes[..], out_address.as_str()).await {
+                Ok(bytes_send) => {
+                    // collect statistics for tx
+                    if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                        trace!("Error sending runtime send statistics for route '{}' through channel: {}", route.name, msg);
+                    }
+                }
+                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(err) => {
+                    error!("{}", err);
+                    break;
                 }
             }
-            Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(err) => {
-                error!("{}", err);
-                break;
-            }
         }
     }
 }
 
-// FIXME route sends received messages out via the same socket instead of the other
-async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Bytes>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
+async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<TcpIn>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
     loop {
-        let bytes = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
+        let (bytes, from_address) = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 
         // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
-        // TODO filter/transform
+        if passes_filters(&bytes, route.filters.iter(), &&*&(bytes.len(), from_address)) {
+            // TODO transform
+            // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
+            // let bytes_produced = send_buf.len();
+            let bytes_produced = bytes.len();
+            let _bytes_out = out_sender.send(bytes.freeze()).expect("Error forwarding outgoing data to sending sockets");
 
-        // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
-        // let bytes_produced = send_buf.len();
-        let bytes_produced = bytes.len();
-        let _bytes_out = out_sender.send(bytes.clone()).expect("Error forwarding outgoing data to sending sockets");
-
-        if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
-            trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+            if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
+                trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
+            }
         }
     }
 }

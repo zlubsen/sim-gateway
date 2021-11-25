@@ -470,6 +470,12 @@ async fn create_route_tcp_server_tcp_client(route : Arc<Route>, event_tx: BcSend
     if let Some(handle) = task_handle_reverse {
         handle.await.expect(format!("Route {} task tcp(server)<-tcp(client) panicked", route.name).as_str());
     }
+    // TODO switch to tokio::join! to await the handles?
+    // tokio::join!(
+    //     handle_accept,
+    //     out_tcp_read_handle,
+    //     out_tcp_write_handle
+    // );
     handle_accept.await.expect(format!("Route {} task tcp(server)->udp panicked - accept loop", route.name).as_str());
     out_tcp_read_handle.await.expect(format!("TCP reader (out) task failed to join for route '{}'", route.name).as_str());
     out_tcp_write_handle.await.expect(format!("TCP writer (out) task failed to join for route '{}'", route.name).as_str());
@@ -858,8 +864,9 @@ async fn run_udp_udp_route(route : Arc<Route>,
         }
 
         if passes_filters(&buf, route.filters.iter(), &&*&(bytes_received, from_address)) {
-            // TODO transform
-            match out_socket.send_to(&buf[..bytes_received],
+            let send_buf = apply_transformers(&buf, route.transformers.iter(), &&(bytes_received, from_address));
+
+            match out_socket.send_to(&send_buf[..],
                                      out_address.as_str()).await {
                 Ok(bytes_send) => {
                     // collect statistics for tx
@@ -894,13 +901,8 @@ async fn run_udp_tcp_route(route : Arc<Route>,
             trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);
         }
 
-        trace!("testing filters");
-        if passes_filters(&buf, route.filters.iter(), &&*&(bytes_received, from_address)) {
-            // TODO transform
-            trace!("should do some transforms now");
-            let send_buf = apply_transformers(&buf, route.transformers.iter(), &&(bytes_received, from_address)).freeze();
-
-            // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
+        if passes_filters(&buf, route.filters.iter(), &&(bytes_received, from_address)) {
+            let send_buf = apply_transformers(&buf, route.transformers.iter(), &&(bytes_received, from_address));
             let bytes_produced = send_buf.len();
 
             let _num_receivers = out_sender.send(send_buf.clone()).expect("Error forwarding outgoing data to sending sockets");
@@ -922,8 +924,9 @@ async fn run_tcp_udp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Tcp
         }
 
         if passes_filters(&bytes, route.filters.iter(), &&*&(bytes.len(), from_address)) {
-            // TODO transform
-            match out_socket.send_to(&bytes[..], out_address.as_str()).await {
+            let send_buf = apply_transformers(&bytes, route.transformers.iter(), &&(bytes.len(), from_address));
+
+            match out_socket.send_to(&send_buf[..], out_address.as_str()).await {
                 Ok(bytes_send) => {
                     // collect statistics for tx
                     if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
@@ -952,11 +955,10 @@ async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Tcp
         }
 
         if passes_filters(&bytes, route.filters.iter(), &&*&(bytes.len(), from_address)) {
-            // TODO transform
-            // let send_buf = Bytes::copy_from_slice(&buf[..bytes_received]);
-            // let bytes_produced = send_buf.len();
-            let bytes_produced = bytes.len();
-            let _bytes_out = out_sender.send(bytes.freeze()).expect("Error forwarding outgoing data to sending sockets");
+            let send_buf = apply_transformers(&bytes, route.transformers.iter(), &&(bytes.len(), from_address));
+            let bytes_produced = send_buf.len();
+
+            let _bytes_out = out_sender.send(send_buf).expect("Error forwarding outgoing data to sending sockets");
 
             if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
                 trace!("Error sending runtime receive statistics for route '{}' through channel: {}", route.name, msg);

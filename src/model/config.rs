@@ -7,8 +7,9 @@ use std::fmt;
 use std::error::Error;
 
 use strum::{EnumString, IntoStaticStr};
-use log::{trace, error};
+use log::{error};
 use lazy_static::lazy_static;
+use crate::HubSpec;
 
 use crate::model::arguments::{Arguments, RouteSpec, EndPointSpec};
 use crate::model::constants::*;
@@ -49,6 +50,7 @@ impl Display for ConfigError {
 pub struct Config {
     pub mode : Mode,
     pub routes : Vec<Route>,
+    pub hubs : Vec<Hub>,
 }
 
 impl Config {
@@ -63,7 +65,8 @@ impl Config {
 impl Default for Config {
     fn default() -> Self { Config {
         mode : Mode::Interactive,
-        routes : Vec::new()
+        routes : Vec::new(),
+        hubs : Vec::new(),
     } }
 }
 
@@ -86,9 +89,20 @@ impl TryFrom<&Arguments> for Config {
             .map(|ok|ok.as_ref().unwrap().to_owned())
             .collect();
 
+        let parsed_hubs : Vec<Result<Hub, Self::Error>> = args.hubs.iter()
+            .map(|hub_spec| { Hub::try_from(hub_spec) }).collect();
+
+        parsed_hubs.iter().filter(|&res| res.is_err()).for_each(|err|error!("{}", err.as_ref().unwrap_err()));
+
+        let hubs = parsed_hubs.iter()
+            .filter(|res|res.is_ok())
+            .map(|ok|ok.as_ref().unwrap().to_owned())
+            .collect();
+
         Ok(Config {
             mode,
             routes,
+            hubs,
         })
     }
 }
@@ -163,7 +177,7 @@ impl TryFrom<&RouteSpec> for Route {
                 .collect()
         } else { Vec::new() };
 
-        let transformers = if let Some(transformer_names) = &spec.filters {
+        let transformers = if let Some(transformer_names) = &spec.transformers {
             transformer_names.iter().map(|name| transformer_from_str(name.as_str()))
                 .map(|t| t.unwrap())
                 // .map(|t| {let x : Box<dyn Transformer> = Box::new(t); x})
@@ -179,6 +193,75 @@ impl TryFrom<&RouteSpec> for Route {
             max_connections,
             flow_mode,
             block_host,
+            enabled,
+            filters,
+            transformers,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Hub {
+    pub name : String,
+    pub connections: Vec<EndPoint>,
+    pub buffer_size : usize,
+    pub max_connections: usize,
+    pub enabled : bool,
+    pub filters : FilterList,
+    pub transformers : TransformerList,
+}
+
+impl Hub {
+    pub fn new(name : String, connections : Vec<EndPoint>, buffer_size : usize,
+               max_connections : usize, enabled : bool,
+               filters : FilterList, transformers : TransformerList) -> Self {
+        Hub {
+            name,
+            connections,
+            buffer_size,
+            max_connections,
+            enabled,
+            filters,
+            transformers,
+        }
+    }
+}
+
+impl TryFrom<&HubSpec> for Hub {
+    type Error = ConfigError;
+
+    fn try_from(spec: &HubSpec) -> Result<Self, Self::Error> {
+        let name = String::from(spec.name.as_str()); // TODO name cannot be empty string
+        let connections = if let Some(end_points) = &spec.connections {
+            end_points.iter().map(|ep| EndPoint::try_from(ep))
+                .filter(|res|res.is_ok()).map(|res|res.expect("Should be Ok")).collect()
+        } else { Vec::new() };
+
+        let buffer_size = spec.buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE_BYTES);
+        let max_connections = spec.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        let enabled = spec.enabled.unwrap_or(DEFAULT_ENABLED);
+
+        let filters = if let Some(filter_names) = &spec.filters {
+            filter_names.iter().map(|name| filter_from_str(name.as_str()))
+                .map(|f| f.unwrap())
+                // .map(|f| {let x : Box<dyn Filter> = Box::new(f); x})
+                .map(|f| Arc::new(f))
+                .collect()
+        } else { Vec::new() };
+
+        let transformers = if let Some(transformer_names) = &spec.transformers {
+            transformer_names.iter().map(|name| transformer_from_str(name.as_str()))
+                .map(|t| t.unwrap())
+                // .map(|t| {let x : Box<dyn Transformer> = Box::new(t); x})
+                .map(|t| Arc::new(t))
+                .collect()
+        } else { Vec::new() };
+
+        Ok(Hub{
+            name,
+            connections,
+            buffer_size,
+            max_connections,
             enabled,
             filters,
             transformers,
@@ -303,9 +386,11 @@ impl Default for FlowMode {
 
 pub fn merge_configs(file_args: Option<Config>, cli_args : Option<Config>) -> Config {
     if file_args.is_some() && cli_args.is_some() {
+        let some_args = file_args.unwrap();
         Config {
             mode : cli_args.unwrap().mode,
-            routes : file_args.unwrap().routes,
+            routes : some_args.routes,
+            hubs : some_args.hubs,
         }
     } else if file_args.is_some() && cli_args.is_none() {
         file_args.unwrap()

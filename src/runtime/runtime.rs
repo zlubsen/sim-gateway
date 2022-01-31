@@ -55,6 +55,15 @@ pub async fn start_runtime(mut command_rx: BcReceiver<Command>, event_tx: BcSend
         })
     }).collect();
 
+    // spawn hubs
+    let hub_handles : Vec<JoinHandle<()>> = Config::current().hubs.iter().filter(|h|h.enabled).map(|hub| {
+        let h = Arc::new(hub.clone());
+        let event_channel = event_tx.clone();
+        tokio::spawn( async move {
+            start_hub(h, event_channel).await;
+        })
+    }).collect();
+
     // TODO review channel capacity
     let (stats_tx , stats_rx) : (MpscSender<Statistics>, MpscReceiver<Statistics>) = mpsc_channel(STATS_CHANNEL_CAPACITY);
     let stats_collector_handle =
@@ -81,6 +90,9 @@ pub async fn start_runtime(mut command_rx: BcReceiver<Command>, event_tx: BcSend
                     stats_collector_handle.abort();
                     for r in route_handles {
                         r.abort();
+                    }
+                    for h in hub_handles {
+                        h.abort();
                     }
                     break;
                 }
@@ -965,4 +977,8 @@ async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Tcp
             }
         }
     }
+}
+
+async fn start_hub(_hub : Arc<Hub>, _event_tx: BcSender<Event>) {
+    todo!()
 }

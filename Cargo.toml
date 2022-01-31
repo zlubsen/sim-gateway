@@ -2,7 +2,11 @@
 name = "sim-gateway"
 version = "0.1.0"
 authors = ["Zeeger <zeeger@lubsen.eu>"]
-edition = "2018"
+description = """
+A gateway component to route, filter and transform (simulation related) data.
+"""
+#readme = "README.md"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,7 +19,7 @@ strum = { version = "0.21.0", features = ["derive"] }
 serde = "1.0.130"
 serde_derive = "1.0.130"
 lazy_static = "1.4.0"
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.14.0", features = ["full"] }
 bytes = "1.1.0"
 tui = { version = "0.16", default-features = false, features = ['crossterm'] }
 crossterm = "0.22.1"

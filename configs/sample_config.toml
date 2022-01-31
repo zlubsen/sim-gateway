@@ -158,11 +158,34 @@ buffer_size = 32768
 flow_mode = "unidirectional"
 #filters = ["PassAll"]
 transformers = ["CapitalizeUTF8"]
+enabled = false
+
+[[routes]]
+name = "udp-udp-transform-capitalize"
+in_point = { uri = "udp://192.168.8.158:3001", interface = "192.168.8.158"}
+out_point = { uri = "udp://192.168.8.255:3000", interface = "192.168.8.158", kind = "Broadcast" }
+buffer_size = 32768
+flow_mode = "unidirectional"
+#filters = ["PassAll"]
+transformers = ["CapitalizeUTF8"]
 enabled = true
+
+[[hubs]]
+name = "basic-hub"
+buffer_size = 32768
+connections = [
+    { uri = "tcp://192.168.8.158:3101", interface = "192.168.8.158", kind = "Server" },
+    { uri = "tcp://192.168.8.158:3102", interface = "192.168.8.158", kind = "Server" }
+    { uri = "tcp://192.168.8.158:3103", interface = "192.168.8.158", kind = "Server" }
+]
+#filters = ["PassAll"]
+#transformers = ["CapitalizeUTF8"]
+enabled = false
 
 # Issues
 # Udp(uni)-tcp(server), bidirectional, udp stuurt uit op lo ipv geconfigureerde interface - nog algemeen issue welke interface gepakt wordt
 
 # TODO retry connect loop in create_tcp_client_socket, for when the configured server socket is not yet up
+# TODO switch to tokio::join! to await the handles?
 # TODO replace trace! lines in runtime.rs with event_tx.send(error);
 # TODO remove .expect() calls (a.o. after socket.accept() call). Use if let Ok()...

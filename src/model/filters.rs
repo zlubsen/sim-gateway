@@ -2,8 +2,16 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::slice::Iter;
 use std::sync::Arc;
+
 use bytes::BytesMut;
+
 use crate::model::{Filter, PacketMetaData};
+
+/// To add a filter:
+/// - create a struct for the Filter
+/// - implement trait Filter for the struct
+/// - add it to the Filters enum
+/// - add a line to the filter_from_str function to create the type
 
 #[derive(Debug, Clone)]
 pub enum Filters {

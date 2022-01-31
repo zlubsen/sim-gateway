@@ -5,6 +5,7 @@ pub struct Arguments {
     pub metadata : MetaData,
     pub mode : Option<String>,
     pub routes : Vec<RouteSpec>,
+    pub hubs : Vec<HubSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +26,7 @@ pub struct RouteSpec {
     pub block_host : Option<bool>,
     pub enabled: Option<bool>,
     pub filters: Option<Vec<String>>,
+    pub transformers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,4 +35,15 @@ pub struct EndPointSpec {
     pub interface: String,
     pub kind: Option<String>,
     pub ttl: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HubSpec {
+    pub name: String,
+    pub connections: Option<Vec<EndPointSpec>>,
+    pub buffer_size: Option<usize>,
+    pub max_connections: Option<usize>,
+    pub enabled: Option<bool>,
+    pub filters: Option<Vec<String>>,
+    pub transformers: Option<Vec<String>>,
 }

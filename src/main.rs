@@ -121,6 +121,7 @@ fn get_config(arg_matches : &ArgMatches) -> Result<Config, Box<dyn std::error::E
         Some(Config {
             mode: Mode::Interactive,
             routes: Vec::new(),
+            hubs: Vec::new(),
         })
     } else { None };
 

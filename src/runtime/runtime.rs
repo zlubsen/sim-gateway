@@ -59,6 +59,7 @@ pub async fn start_runtime(mut command_rx: BcReceiver<Command>, event_tx: BcSend
     let hub_handles : Vec<JoinHandle<()>> = Config::current().hubs.iter().filter(|h|h.enabled).map(|hub| {
         let h = Arc::new(hub.clone());
         let event_channel = event_tx.clone();
+        trace!("spawn start_hub");
         tokio::spawn( async move {
             start_hub(h, event_channel).await;
         })
@@ -979,6 +980,138 @@ async fn run_tcp_tcp_route(route : Arc<Route>, mut in_receiver: MpscReceiver<Tcp
     }
 }
 
-async fn start_hub(_hub : Arc<Hub>, _event_tx: BcSender<Event>) {
-    todo!()
+async fn start_hub(hub: Arc<Hub>, event_tx: BcSender<Event>) {
+    // let listeners : Vec<TcpListener> = hub.connections.iter()
+    //     .map(|endpoint| create_tcp_server_socket(endpoint))
+    //     .collect();
+    //
+    // if listeners.is_empty() {
+    //     return;
+    // }
+trace!("starting hub {}", hub.name);
+    // TODO currently only supports one TCP socket, to accommodate multiple connections. We take the first if > 1 is configured
+    let listener = create_tcp_server_socket(hub.connections
+        .first()
+        .expect(format!("Should be at least one hub connection configured for hub {}", hub.name).as_str())
+    ).await;
+
+    let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
+
+    let handle_accept = tokio::spawn(run_hub_accept_loop(hub.clone(), listener, to_tcp_sender.clone(), from_tcp_sender, event_tx.clone()));
+    let handle_hub = tokio::spawn(run_hub(hub.clone(), from_tcp_receiver, to_tcp_sender.clone(), event_tx.clone()));
+
+    handle_hub.await.expect(format!("Hub {} task panicked", hub.name).as_str());
+    handle_accept.await.expect(format!("Hub {} task panicked - accept loop", hub.name).as_str());
+}
+
+async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
+    trace!("run_hub");
+    loop {
+        let (bytes, from_address) = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
+
+        // collect statistics for rx
+        if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
+            trace!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg);
+        }
+
+        if passes_filters(&bytes, hub.filters.iter(), &&*&(bytes.len(), from_address)) {
+            let send_buf = apply_transformers(&bytes, hub.transformers.iter(), &&(bytes.len(), from_address));
+            let bytes_produced = send_buf.len();
+
+            let _bytes_out = out_sender.send(send_buf).expect("Error forwarding outgoing data to sending sockets");
+
+            if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
+                trace!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg);
+            }
+        }
+    }
+}
+
+async fn run_hub_accept_loop(hub : Arc<Hub>, socket : TcpListener, to_tcp_sender: BcSender<Bytes>, from_tcp_sender: MpscSender<TcpIn>, event_tx: BcSender<Event>) {
+    let sem = Arc::new(Semaphore::new(hub.max_connections));
+trace!("run_hub_accept_loop");
+    loop {
+        if let Ok(permit) = sem.clone().acquire_owned().await {
+            let (stream, _addr) = socket.accept().await
+                .expect(format!("Error establishing incoming TCP connection for hub '{}'.", hub.name).as_str());
+            let (reader, writer) = stream.into_split();
+            let notifier = Arc::new(Notify::new());
+
+            let read_handle = tokio::spawn(run_hub_reader(hub.clone(), reader, notifier.clone(), from_tcp_sender.clone(), event_tx.clone()));
+            let write_handle = tokio::spawn(run_hub_writer(hub.clone(), writer, notifier.clone(), to_tcp_sender.subscribe(), event_tx.clone()));
+
+            // task to wait for task joins
+            tokio::spawn(async move {
+                read_handle.await.unwrap();
+                write_handle.await.unwrap();
+                drop(permit); // Permits should be dropped after a spawned socket task has finished.
+            });
+        } else {
+            // TODO
+            event_tx.send(
+                Event::Error(
+                    format!("Error acquiring a permit for TCP connection on socket {} for route '{}'",
+                            socket.local_addr().unwrap(),
+                            hub.name)))
+                .unwrap_or_default();
+        }
+    }
+}
+
+async fn run_hub_reader(hub: Arc<Hub>, mut reader: OwnedReadHalf, closer: Arc<Notify>, data_channel: MpscSender<TcpIn>, event_tx: BcSender<Event>) {
+    let mut buf = BytesMut::with_capacity(hub.buffer_size);
+    buf.resize(hub.buffer_size, 0);
+    trace!("run_hub_reader");
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => {
+                closer.notify_one();
+                break;
+            }
+            Ok(bytes_received) => {
+                // FIXME now always copying the whole buf
+                // let buf_to_send = Bytes::copy_from_slice(&buf[..bytes_received]);
+                let buf_to_send = BytesMut::from(&buf[..bytes_received]);
+                // TODO adapt event to include reader.peer_addr or some id to identify the peer; also adapt for routes
+                if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes_received)) {
+                    event_tx.send(Event::Error(
+                        format!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg)
+                    )).unwrap_or_default();
+                }
+                data_channel.send((buf_to_send, reader.peer_addr().unwrap())).await.expect("Error sending received data through mpsc channel.");
+            }
+            Err(err) => {
+                event_tx.send(Event::Error(format!("Error while receiving data via tcp: {}", err))).unwrap_or_default();
+                break;
+            }
+        }
+    }
+}
+
+async fn run_hub_writer(hub: Arc<Hub>, mut writer: OwnedWriteHalf, closer: Arc<Notify>, mut data_channel: BcReceiver<Bytes>, event_tx: BcSender<Event>) {
+    trace!("run_hub_writer");
+    loop {
+        tokio::select! {
+            _ = closer.notified() => {
+                break;
+            }
+            received = data_channel.recv() => {
+                if let Ok(out_buf) = received {
+                    match writer.write(&out_buf[..]).await {
+                        Ok(0) => { break; }
+                        Ok(bytes_send) => {
+                            if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_send)) {
+                                trace!("Error sending runtime send statistics for route '{}' through channel: {}", hub.name, msg);
+                            }
+                        }
+                        Err(err) => {
+                            trace!("Error sending data through TCP socket '{:?}': {:?}", writer, err);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -106,7 +106,7 @@ in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158"}
 out_point = { uri = "tcp://192.168.8.158:3009", interface = "192.168.8.158"}
 flow_mode = "bidirectional"
 block_host = false
-enabled = false
+enabled = true
 
 [[routes]]
 name = "udp-tcp(client)"
@@ -168,14 +168,14 @@ buffer_size = 32768
 flow_mode = "unidirectional"
 #filters = ["PassAll"]
 transformers = ["CapitalizeUTF8"]
-enabled = true
+enabled = false
 
 [[hubs]]
 name = "basic-hub"
 buffer_size = 32768
 connections = [
     { uri = "tcp://192.168.8.158:3101", interface = "192.168.8.158", kind = "Server" },
-    { uri = "tcp://192.168.8.158:3102", interface = "192.168.8.158", kind = "Server" }
+    { uri = "tcp://192.168.8.158:3102", interface = "192.168.8.158", kind = "Server" },
     { uri = "tcp://192.168.8.158:3103", interface = "192.168.8.158", kind = "Server" }
 ]
 #filters = ["PassAll"]
@@ -189,3 +189,4 @@ enabled = false
 # TODO switch to tokio::join! to await the handles?
 # TODO replace trace! lines in runtime.rs with event_tx.send(error);
 # TODO remove .expect() calls (a.o. after socket.accept() call). Use if let Ok()...
+# TODO add bytes filtered to stats

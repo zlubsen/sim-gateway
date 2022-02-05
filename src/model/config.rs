@@ -233,8 +233,11 @@ impl TryFrom<&HubSpec> for Hub {
     fn try_from(spec: &HubSpec) -> Result<Self, Self::Error> {
         let name = String::from(spec.name.as_str()); // TODO name cannot be empty string
         let connections = if let Some(end_points) = &spec.connections {
-            end_points.iter().map(|ep| EndPoint::try_from(ep))
-                .filter(|res|res.is_ok()).map(|res|res.expect("Should be Ok")).collect()
+            end_points.iter().map(|endpoint| EndPoint::try_from(endpoint))
+                .filter(|res|res.is_ok()).map(|res|res.expect("Should be Ok"))
+                // TODO now silently dumps all Endpoints that are not a TCP server
+                .filter(|endpoint| endpoint.socket_type == SocketType::TcpSocketType(TcpSocketType::Server) )
+                .collect()
         } else { Vec::new() };
 
         let buffer_size = spec.buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE_BYTES);

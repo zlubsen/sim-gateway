@@ -25,6 +25,7 @@ use crate::model::filters::passes_filters;
 use crate::model::transformers::apply_transformers;
 
 type TcpIn = (BytesMut, SocketAddr);
+type TcpHubOut = (Bytes, SocketAddr);
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -125,6 +126,9 @@ async fn run_stats_collector(mut event_rx: BcReceiver<Event>, publisher: MpscSen
     let mut total_tx: u64 = 0;
     let mut window_rx: f64 = 0.0;
     let mut window_tx: f64 = 0.0;
+
+    let mut tcp_connections : usize = 0;
+
     let mut interval = interval(Duration::from_secs(STATS_AGGREGATION_WINDOW_SECS));
 
     loop {
@@ -141,16 +145,24 @@ async fn run_stats_collector(mut event_rx: BcReceiver<Event>, publisher: MpscSen
                     match event {
                         Event::Message(_) => {}
                         Event::Error(_) => {}
-                        Event::SocketConnected(_scheme, _address) => {}
-                        Event::SocketDisconnected(_scheme, _address) => {}
+                        Event::SocketConnected(_scheme, _address) => {
+                            tcp_connections += 1;
+                            // TODO handle without trace!()
+                            trace!("TCP socket connected: {} - total connections: {}", _address, tcp_connections);
+                        }
+                        Event::SocketDisconnected(_scheme, _address) => {
+                            // TODO handle without trace!()
+                            tcp_connections -= 1;
+                            trace!("TCP socket disconnected: {} - total connections: {}", _address, tcp_connections);
+                        }
                         Event::StatBytesReceived(_id, num_bytes) => {
-                            total_rx += total_rx + num_bytes as u64;
-                            window_rx += window_rx + num_bytes as f64;
+                            total_rx += num_bytes as u64;
+                            window_rx += num_bytes as f64;
                             publisher.send(Statistics::TotalBytes(0, total_rx, total_tx)).await.expect("Error publishing stats");
                         }
                         Event::StatBytesSend(_id, num_bytes) => {
-                            total_tx += total_tx + num_bytes as u64;
-                            window_tx += window_tx + num_bytes as f64;
+                            total_tx += num_bytes as u64;
+                            window_tx += num_bytes as f64;
                             publisher.send(Statistics::TotalBytes(0, total_rx, total_tx)).await.expect("Error publishing stats");
                         }
                         Event::ErrorTooManyConnections(_, _) => {}
@@ -712,8 +724,10 @@ async fn run_tcp_accept_loop(route : Arc<Route>, socket : TcpListener, to_tcp_se
 
     loop {
         if let Ok(permit) = sem.clone().acquire_owned().await {
-            let (stream, _addr) = socket.accept().await
+            let (stream, peer_addr) = socket.accept().await
                 .expect(format!("Error establishing incoming TCP connection for route '{}'.", route.name).as_str());
+            event_tx.send(Event::SocketConnected(Scheme::TCP, peer_addr))
+                .expect("Error sending Event::SocketConnected through route event channel.");
             let (reader, writer) = stream.into_split();
             let notifier = Arc::new(Notify::new());
 
@@ -818,6 +832,9 @@ async fn run_tcp_reader(route : Arc<Route>, mut reader: OwnedReadHalf, closer : 
         match reader.read(&mut buf).await {
             Ok(0) => {
                 closer.notify_one();
+                event_tx.send(Event::SocketDisconnected(
+                    Scheme::TCP, reader.peer_addr().expect("Should be Ok")))
+                    .expect("Error sending Event::SocketDisconnected through event channel.");
                 break;
             }
             Ok(bytes_received) => {
@@ -988,14 +1005,14 @@ async fn start_hub(hub: Arc<Hub>, event_tx: BcSender<Event>) {
     // if listeners.is_empty() {
     //     return;
     // }
-trace!("starting hub {}", hub.name);
+
     // TODO currently only supports one TCP socket, to accommodate multiple connections. We take the first if > 1 is configured
     let listener = create_tcp_server_socket(hub.connections
         .first()
         .expect(format!("Should be at least one hub connection configured for hub {}", hub.name).as_str())
     ).await;
 
-    let (to_tcp_sender, _to_tcp_receiver) : (BcSender<Bytes>, BcReceiver<Bytes>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
+    let (to_tcp_sender, _to_tcp_receiver) : (BcSender<TcpHubOut>, BcReceiver<TcpHubOut>) = bc_channel(SOCKET_CHANNEL_CAPACITY);
     let (from_tcp_sender, from_tcp_receiver) : (MpscSender<TcpIn>, MpscReceiver<TcpIn>) = mpsc_channel(SOCKET_CHANNEL_CAPACITY);
 
     let handle_accept = tokio::spawn(run_hub_accept_loop(hub.clone(), listener, to_tcp_sender.clone(), from_tcp_sender, event_tx.clone()));
@@ -1005,8 +1022,7 @@ trace!("starting hub {}", hub.name);
     handle_accept.await.expect(format!("Hub {} task panicked - accept loop", hub.name).as_str());
 }
 
-async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender : BcSender<Bytes>, event_tx: BcSender<Event>) {
-    trace!("run_hub");
+async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender : BcSender<TcpHubOut>, event_tx: BcSender<Event>) {
     loop {
         let (bytes, from_address) = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 
@@ -1019,7 +1035,7 @@ async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender
             let send_buf = apply_transformers(&bytes, hub.transformers.iter(), &&(bytes.len(), from_address));
             let bytes_produced = send_buf.len();
 
-            let _bytes_out = out_sender.send(send_buf).expect("Error forwarding outgoing data to sending sockets");
+            let _bytes_out = out_sender.send((send_buf, from_address)).expect("Error forwarding outgoing data to sending sockets");
 
             if let Err(msg) = event_tx.send(Event::StatBytesSend(0, bytes_produced)) {
                 trace!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg);
@@ -1028,13 +1044,15 @@ async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender
     }
 }
 
-async fn run_hub_accept_loop(hub : Arc<Hub>, socket : TcpListener, to_tcp_sender: BcSender<Bytes>, from_tcp_sender: MpscSender<TcpIn>, event_tx: BcSender<Event>) {
+async fn run_hub_accept_loop(hub : Arc<Hub>, socket : TcpListener, to_tcp_sender: BcSender<TcpHubOut>, from_tcp_sender: MpscSender<TcpIn>, event_tx: BcSender<Event>) {
     let sem = Arc::new(Semaphore::new(hub.max_connections));
-trace!("run_hub_accept_loop");
+
     loop {
         if let Ok(permit) = sem.clone().acquire_owned().await {
-            let (stream, _addr) = socket.accept().await
+            let (stream, peer_addr) = socket.accept().await
                 .expect(format!("Error establishing incoming TCP connection for hub '{}'.", hub.name).as_str());
+            event_tx.send(Event::SocketConnected(Scheme::TCP, peer_addr))
+                .expect("Error sending Event::SocketConnected through hub event channel.");
             let (reader, writer) = stream.into_split();
             let notifier = Arc::new(Notify::new());
 
@@ -1062,11 +1080,14 @@ trace!("run_hub_accept_loop");
 async fn run_hub_reader(hub: Arc<Hub>, mut reader: OwnedReadHalf, closer: Arc<Notify>, data_channel: MpscSender<TcpIn>, event_tx: BcSender<Event>) {
     let mut buf = BytesMut::with_capacity(hub.buffer_size);
     buf.resize(hub.buffer_size, 0);
-    trace!("run_hub_reader");
+
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => {
                 closer.notify_one();
+                event_tx.send(Event::SocketDisconnected(
+                    Scheme::TCP, reader.peer_addr().expect("Should be Ok.")))
+                    .expect("Error sending Event::SocketDisconnected through hub event channel.");
                 break;
             }
             Ok(bytes_received) => {
@@ -1079,7 +1100,8 @@ async fn run_hub_reader(hub: Arc<Hub>, mut reader: OwnedReadHalf, closer: Arc<No
                         format!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg)
                     )).unwrap_or_default();
                 }
-                data_channel.send((buf_to_send, reader.peer_addr().unwrap())).await.expect("Error sending received data through mpsc channel.");
+                data_channel.send((buf_to_send, reader.peer_addr().expect("TCP Peer address should be Ok")))
+                    .await.expect("Error sending received data through mpsc channel.");
             }
             Err(err) => {
                 event_tx.send(Event::Error(format!("Error while receiving data via tcp: {}", err))).unwrap_or_default();
@@ -1089,15 +1111,15 @@ async fn run_hub_reader(hub: Arc<Hub>, mut reader: OwnedReadHalf, closer: Arc<No
     }
 }
 
-async fn run_hub_writer(hub: Arc<Hub>, mut writer: OwnedWriteHalf, closer: Arc<Notify>, mut data_channel: BcReceiver<Bytes>, event_tx: BcSender<Event>) {
-    trace!("run_hub_writer");
+async fn run_hub_writer(hub: Arc<Hub>, mut writer: OwnedWriteHalf, closer: Arc<Notify>, mut data_channel: BcReceiver<TcpHubOut>, event_tx: BcSender<Event>) {
     loop {
         tokio::select! {
             _ = closer.notified() => {
                 break;
             }
             received = data_channel.recv() => {
-                if let Ok(out_buf) = received {
+                if let Ok((out_buf, from_address)) = received {
+                    if writer.peer_addr().expect("TcpWriter peer_addr Should be Ok") == from_address { continue; }
                     match writer.write(&out_buf[..]).await {
                         Ok(0) => { break; }
                         Ok(bytes_send) => {

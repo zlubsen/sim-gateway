@@ -106,7 +106,7 @@ in_point = { uri = "tcp://192.168.8.158:3008", interface = "192.168.8.158"}
 out_point = { uri = "tcp://192.168.8.158:3009", interface = "192.168.8.158"}
 flow_mode = "bidirectional"
 block_host = false
-enabled = true
+enabled = false
 
 [[routes]]
 name = "udp-tcp(client)"
@@ -180,7 +180,7 @@ connections = [
 ]
 #filters = ["PassAll"]
 #transformers = ["CapitalizeUTF8"]
-enabled = false
+enabled = true
 
 # Issues
 # Udp(uni)-tcp(server), bidirectional, udp stuurt uit op lo ipv geconfigureerde interface - nog algemeen issue welke interface gepakt wordt

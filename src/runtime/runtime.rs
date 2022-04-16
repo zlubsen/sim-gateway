@@ -1026,7 +1026,6 @@ async fn run_hub(hub: Arc<Hub>, mut in_receiver: MpscReceiver<TcpIn>, out_sender
     loop {
         let (bytes, from_address) = in_receiver.recv().await.expect("Error receiving from incoming endpoint channel.");
 
-        // collect statistics for rx
         if let Err(msg) = event_tx.send(Event::StatBytesReceived(0, bytes.len())) {
             trace!("Error sending runtime receive statistics for hub '{}' through channel: {}", hub.name, msg);
         }

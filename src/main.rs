@@ -4,7 +4,6 @@ pub mod runtime;
 pub mod model;
 
 use log::{info};
-use env_logger;
 
 extern crate clap;
 use clap::{Arg, App, ArgMatches};
@@ -32,9 +31,19 @@ use crate::model::arguments::*;
 use crate::model::config::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logger();
-
     let arg_matches = get_cli_arguments();
+
+    // Setup logging & RUST_LOG from args; RUST_LOG takes precedence over the -log argument; defaults to "info"
+    if std::env::var("RUST_LOG").is_err() {
+        let log_level = if let Some(log_level) = arg_matches.value_of("log") {
+            log_level
+        } else {
+            "info"
+        };
+        std::env::set_var("RUST_LOG", format!("{},mio=info", log_level));
+    }
+    // enable console logging
+    tracing_subscriber::fmt::init();
 
     get_config(&arg_matches)?.make_new_current();
     let mode = Config::current().mode;
@@ -76,14 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn init_logger() {
-    env_logger::init();
-}
-
 fn get_cli_arguments() -> ArgMatches<'static> {
     // Read config: we expect a .toml file with the config (required for now).
     // TODO Or perhaps later most settings as separate arguments.
-    // TODO -v verbosity level for logger
     App::new("sim-gateway")
         .version("0.1.0")
         .author("Zeeger Lubsen <zeeger@lubsen.eu>")
@@ -93,12 +97,20 @@ fn get_cli_arguments() -> ArgMatches<'static> {
             .long("config")
             .value_name("FILE")
             .help("Sets a custom config file (.toml)")
-            // .required(true)
+            .required(true)
             .takes_value(true))
         .arg(Arg::with_name("interactive")
             .short("i")
             .long("interactive")
+            .required(false)
             .help("Enable interactive CLI mode"))
+        .arg(Arg::with_name("log")
+            .short("l")
+            .long("log")
+            .value_name("LOG_LEVEL")
+            .help("Sets the log level (trace, debug, info, warn, error)")
+            .required(false)
+            .takes_value(true))
         .get_matches()
 }
 
